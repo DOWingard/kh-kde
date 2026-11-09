@@ -61,8 +61,21 @@ install_deps() {
   pacman -Syu --noconfirm --needed --noprogressbar "${deps[@]}" "${CHECK_DEPS[@]}"
 }
 
+drop_kwin_capability() {
+  # kwin_wayland carries CAP_SYS_NICE as a file capability, and a container
+  # without that capability cannot exec it at all (EPERM). KWin runs without
+  # it, only without realtime scheduling, so this throwaway system drops it.
+  local kwin
+  kwin=$(command -v kwin_wayland) || { log warn "kwin_wayland not installed"; return 0; }
+  if [[ -n $(getcap "$kwin") ]]; then
+    setcap -r "$kwin"
+    log info "file capability dropped so a container can run it" binary="$kwin"
+  fi
+}
+
 as_root() {
   step "install dependencies" install_deps
+  drop_kwin_capability
   if ! id -u "$BUILDER" &>/dev/null; then
     useradd --create-home "$BUILDER"
     log info "unprivileged user created" user="$BUILDER"
