@@ -201,9 +201,14 @@ def main() -> int:
             return 2
 
         app = QtWidgets.QApplication(sys.argv[:1])
-        window, menu, _views = build_gallery(QtWidgets)
+        window, menu, views = build_gallery(QtWidgets)
         window.show()
-        menu.popup(QPoint(0, 0))
+        # The first list has keyboard focus, so it shows the full selection and
+        # the others the muted one of a selection outside the focused view.
+        window.activateWindow()
+        views[0].setFocus()
+        # Opened once the window is active; a popup shown first would take the activation.
+        QTimer.singleShot(200, lambda: menu.popup(QPoint(0, 0)))
         result = {"ok": False}
 
         def shoot() -> None:
