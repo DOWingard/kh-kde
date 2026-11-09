@@ -17,6 +17,7 @@ Supplied by the theme's owner as the art to build on.
 | `kingdom-key-d.png` | Kingdom Key D sprite (colour reference: the gold, silver and bronze tokens) | kh13.com gallery upload |
 | `kh-heart-crown.png` | Series heart-and-crown emblem (light launcher) | pngegg.com |
 | `nobody-sigil.png` | Nobody sigil (dark launcher) | pngaaa.com |
+| `picker.png` | Screenshot of this project's keyblade browser, shown in the README | the theme's owner |
 
 ## `assets/keyblades/` — pointer keyblades
 

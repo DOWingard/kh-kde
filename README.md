@@ -17,6 +17,20 @@ This is a fan project, not affiliated with or endorsed by Disney or Square
 Enix. The artwork, logos, sprites and sounds under `assets/` are theirs (or
 their fan authors'); see `ASSETS.md` for every source. Keep it to personal use.
 
+## Screenshots
+
+| | Organization XIII | Sora |
+| --- | --- | --- |
+| Desktop | ![Organization XIII desktop with Dolphin and Konsole](docs/screenshots/desktop-OrgXIII.jpg) | ![Sora desktop with Dolphin and Konsole](docs/screenshots/desktop-Sora.jpg) |
+| Login screen | ![Organization XIII login screen](docs/screenshots/sddm-OrgXIII.jpg) | ![Sora login screen](docs/screenshots/sddm-Sora.jpg) |
+| Splash screen | ![Organization XIII splash screen](docs/screenshots/splash-OrgXIII.png) | ![Sora splash screen](docs/screenshots/splash-Sora.png) |
+| Applications | ![Organization XIII application style](docs/screenshots/widgets-OrgXIII.png) | ![Sora application style](docs/screenshots/widgets-Sora.png) |
+
+The keyblade browser: Super + right click on the desktop, and the keyblade you
+pick becomes the mouse pointer.
+
+![The keyblade browser, eighteen keyblades in a grid](assets/reference/picker.png)
+
 ## What you get
 
 For each variant:
@@ -321,22 +335,52 @@ buttons; neither may be drawn on its single desktop, and "on all desktops" has
 to appear once a second desktop is added. It needs `kwin_wayland`,
 `dbus-run-session`, `qdbus6` and `spectacle`.
 
+To try the whole theme the way a user gets it, in a real Plasma shell:
+
+```sh
+./tools/nestedplasma.py               # this checkout's build; writes desktop-<variant>.png
+./tools/nestedplasma.py --installed   # the installed package instead
+```
+
+It runs a headless KWin with the Plasma shell on its own home folder, D-Bus
+sessions and runtime folder, so neither the running desktop nor your settings
+are read or changed. Inside it the shell starts on a fresh home, the themes are
+installed and a variant applied, and the shell is started again as a new login
+would start it. The check fails unless the shell kept the Super + right click
+binding and loaded the keyblade plugin: a shell that cannot load a mouse
+action's plugin deletes the binding. Dolphin and Konsole are then opened, when
+installed, and the screen is saved. It also needs `plasmashell` with the Plasma
+Desktop shell, `kactivitymanagerd` and `kquitapp6`.
+
+Both nested tools need a GPU render node (`/dev/dri/renderD*`); KWin does not
+start without one.
+
+The screenshots at the top of this file come from these renders:
+`./tools/preview.py && ./tools/nestedplasma.py && ./tools/screenshots.py`
+refreshes `docs/screenshots/`.
+
 ## Continuous integration
 
 Every push to GitHub, on any branch, and every pull request runs `tools/ci.sh`
 in a clean `archlinux:base-devel` container. It:
 
 1. installs the packages the PKGBUILD declares, plus what the checks need
-   (PyQt6, Kvantum, Spectacle, a font), so a dependency missing from the
-   PKGBUILD fails CI before it fails for an AUR user;
+   (PyQt6, Kvantum, a font), so a dependency missing from the PKGBUILD fails
+   CI before it fails for an AUR user;
 2. builds both variants from scratch;
 3. runs `tests/`: keyblades on system-wide cursor themes, the staged package
    and the tool working against it, lookup order, the soname-bump report;
-4. renders the previews offscreen and runs the decoration under a headless
-   KWin (the two tools under *Looking before applying*);
-5. builds the AUR package with `makepkg` from a fresh source bundle.
+4. renders the previews offscreen (`tools/preview.py`);
+5. builds the AUR package with `makepkg` from a fresh source bundle;
+6. installs that package with `pacman` and checks it as a new user would have
+   it (`tests/installed_package.py`): `status` finds every part, the keyblade
+   plugin loads through libplasma (the call the Plasma shell makes for the
+   mouse binding) from where the package put it, and equipping a keyblade
+   copies the system cursor theme.
 
-The renders and the release files are kept as artifacts of each run.
+CI machines have no GPU, so the two nested checks (`tools/nestedkwin.py`,
+`tools/nestedplasma.py`) do not run there; run them yourself after changing
+the window decoration, the Plasma Style or the keyblade browser.
 
 `main` accepts only commits whose "build and test" check has passed, so a plain
 `git push origin main` of an untested commit is refused. Land work with:
@@ -400,7 +444,9 @@ khtheme/
   log.py              structured logging
 picker/               keyblade menu: Plasma mouse-action plugin, kh-keyblade, preview host
 packaging/aur/        PKGBUILD template and install messages for the AUR package
-tests/                unit and integration tests (python3 -m unittest discover -s tests)
+tests/                unit and integration tests (python3 -m unittest discover -s tests);
+                      installed_package.py checks an installed package (CI)
+docs/screenshots/     the screenshots shown in this file (tools/screenshots.py)
 .github/workflows/    CI: every check on each push, releases from tags
 tools/
   ci.sh               every check, in a clean Arch system (what CI runs)
@@ -411,6 +457,8 @@ tools/
   cursorsheet.py      contact sheet of a built cursor theme
   widgetgallery.py    widgets in one colour scheme and style
   nestedkwin.py       the decoration under a private headless KWin
+  nestedplasma.py     install, apply and log in, in a private Plasma session
+  screenshots.py      refresh docs/screenshots/ from the renders
 dist/                 build output (generated)
 ```
 
