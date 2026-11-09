@@ -261,6 +261,24 @@ def installed_plugin() -> Path | None:
     return None
 
 
+def unresolved_libraries(binary: Path) -> list[str]:
+    """Libraries `binary` was linked against that this system no longer has.
+    libplasma raises its soname when its ABI breaks, which leaves a plugin
+    built before that unloadable until it is rebuilt."""
+    try:
+        result = subprocess.run(["ldd", str(binary)], capture_output=True, text=True, timeout=30)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        log.warn("install", "could not check the plugin's libraries", error=exc, plugin=str(binary))
+        return []
+    return [line.split("=>")[0].strip() for line in result.stdout.splitlines() if "not found" in line]
+
+
+def rebuild_hint() -> str:
+    if system_install():
+        return f"rebuild the package: yay -S --rebuild {SYSTEM_TOOL}"
+    return "rebuild it: ./build.py --only picker && ./install.py install"
+
+
 def keyblade_tool() -> Path | None:
     built = picker.cli(DIST)
     if built.is_file():
@@ -683,6 +701,11 @@ def enable_keyblade_browser() -> None:
         log.warn("install", "keyblade browser not installed; Super + right click left as it was", expected=str(PLUGIN),
                  package_record=str(SYSTEM_INSTALL))
         return
+    stale = unresolved_libraries(plugin)
+    if stale:
+        log.error("install", "the keyblade browser was built against libraries this system no longer has; "
+                  "Super + right click left as it was", plugin=str(plugin), missing=stale, hint=rebuild_hint())
+        return
     write_setting(*SETTINGS["meta_right_window"], PASS_CLICK)
     bound = read_setting(*SETTINGS["meta_right_desktop"]) == picker.PLUGIN_ID
     if not bound:
@@ -838,12 +861,17 @@ def cmd_revert(_args) -> int:
 
 
 def cmd_status(_args) -> int:
+    plugin = installed_plugin()
+    stale = unresolved_libraries(plugin) if plugin is not None else []
+    if stale:
+        log.warn("install", "the keyblade browser cannot load until it is rebuilt", missing=stale, hint=rebuild_hint())
     report = {
         "installed": {pal.key: not missing_components(pal) for pal in VARIANTS},
         "missing": {pal.key: missing_components(pal) for pal in VARIANTS},
         "active": {name: read_setting(*spec) for name, spec in SETTINGS.items()},
         "keyblade": read_setting(KEYBLADE_RC.name, ["Keyblade"], "Current") or None,
-        "keyblade_browser": installed_plugin() is not None,
+        "keyblade_browser": plugin is not None and not stale,
+        "keyblade_browser_missing_libraries": stale,
         "package": system_install().get("version"),
         "backup": str(BACKUP) if BACKUP.exists() else None,
     }
