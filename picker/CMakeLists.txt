@@ -25,7 +25,7 @@ target_link_libraries(khkeyblades PUBLIC Qt6::Gui KF6::ConfigCore)
 target_compile_options(khkeyblades PRIVATE -Wall -Wextra)
 
 kcoreaddons_add_plugin(kingdomhearts_keyblades SOURCES browser.cpp INSTALL_NAMESPACE "plasma/containmentactions")
-# Plasma loads the plugin by file name: no "lib" prefix.
+# Plasma loads the plugin by file name, which is also its id: no "lib" prefix.
 set_target_properties(kingdomhearts_keyblades PROPERTIES OUTPUT_NAME kingdomhearts_keyblades PREFIX "")
 target_link_libraries(kingdomhearts_keyblades PRIVATE khkeyblades Qt6::Widgets KF6::CoreAddons Plasma::Plasma)
 target_compile_options(kingdomhearts_keyblades PRIVATE -Wall -Wextra)
