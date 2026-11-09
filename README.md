@@ -26,10 +26,16 @@ For each variant:
   line as startup progresses
 - **Window decoration**: the caption sits in a command-menu header plate, the
   buttons are round controller prompts (triangle to minimise, square to
-  maximise, cross to close), the window-menu button is the emblem
+  maximise, cross to close), the window-menu button is the emblem. Buttons
+  whose action cannot apply to a window (context help in an application that
+  offers none, "on all desktops" with a single desktop) are left out
 - **Plasma Style**: panel, popups, notifications, tooltips, task buttons and
   list highlights in the same shapes as the windows
 - **Colour scheme** for applications
+- **Application style** (Kvantum): buttons, fields, tabs, lists, menus, scroll
+  bars and sliders in the same shapes. Organization XIII selects with the white
+  bar and black text of the second game's command menu; Sora with logo blue
+  and the gold bar down the left of the first game's menus
 - **Cursor theme**: the Kingdom Key (Sora) or Kingdom Key D (Organization XIII)
   as pointer, the menu glove on links, a walking Sora or Roxas while busy
 - **Icon theme**: heart-and-crown or Nobody sigil as the application launcher,
@@ -43,7 +49,9 @@ same meaning, the menu and title **fonts**, and an **SDDM login theme**.
 
 ## Requirements
 
-- KDE Plasma 6 (KWin with the Aurorae decoration engine, Breeze application style)
+- KDE Plasma 6 (KWin with the Aurorae decoration engine)
+- Kvantum (the `kvantum` package) for the application style; without it `apply`
+  falls back to Breeze in the theme's colours
 - Python 3.10+
 - Build tools: `rsvg-convert` (librsvg), `magick` (ImageMagick 7), `ffmpeg`
 - PyQt6, only for `tools/preview.py`
@@ -82,7 +90,22 @@ Other commands:
 
 `apply` registers Sora as the light Global Theme and Organization XIII as the
 dark one, so Plasma's own day/night switch (System Settings → Colors & Themes →
-Global Theme) moves between the two. The wallpaper and lock screen follow.
+Global Theme) moves between the two. The wallpaper, lock screen and
+application style follow: the light theme selects the `kvantum` style and the
+dark one `kvantum-dark`, and the one Kvantum theme, `KingdomHearts`, holds both
+variants.
+
+### Choosing parts by hand
+
+Every part is also listed on its own under System Settings → Colors & Themes,
+named "Kingdom Hearts — Organization XIII" or "Kingdom Hearts — Sora": Colors,
+Plasma Style, Window Decorations, Icons, Cursors, System Sounds, Splash Screen,
+and the wallpaper. Cursor themes are installed in `~/.icons`, the folder that
+page lists. The application style is chosen under Application Style
+(`kvantum` for Sora, `kvantum-dark` for Organization XIII); the Kvantum theme
+itself lives in `~/.config/Kvantum/KingdomHearts`, and Kvantum Manager can
+select or edit it. Edited copies it saves as `KingdomHearts#` are left alone by
+`install` and `uninstall`.
 
 ### Wallpapers
 
@@ -191,7 +214,12 @@ Nothing here touches the running desktop:
   for the objects KWin and SDDM provide (`tools/preview/mock/`);
 - the cursor sheet is read back from the packed cursor files, with hotspots
   marked, on both a light and a dark surface;
-- the widget gallery is drawn by Breeze in each colour scheme.
+- the widget gallery is drawn by the real Kvantum engine with the built theme
+  and colour scheme, with a menu beside it.
+
+The Kvantum build also checks its own SVG: every element the config makes
+Kvantum ask for must be drawn, because a missing one would be filled in from
+Kvantum's built-in default theme.
 
 The stand-ins cannot catch a mistake against KWin's real decoration API. For
 that, run the decoration under a private, headless KWin:
@@ -204,8 +232,10 @@ It starts KWin on its own D-Bus session with a throw-away configuration, opens
 three test windows (one maximised) and saves that virtual screen. Each window
 also reports the title-bar rectangle KWin holds for it, and the check fails if
 any part of the top bar away from the window edge would resize the window
-instead of moving it. It needs `kwin_wayland`, `dbus-run-session` and
-`spectacle`.
+instead of moving it. The session asks for the help and "on all desktops"
+buttons; neither may be drawn on its single desktop, and "on all desktops" has
+to appear once a second desktop is added. It needs `kwin_wayland`,
+`dbus-run-session`, `qdbus6` and `spectacle`.
 
 ## Layout
 
@@ -220,6 +250,7 @@ khtheme/
   colorscheme.py      application colour scheme
   plasmastyle.py      Plasma Style
   decoration.py       QML window decoration and its art
+  kvantum.py          Kvantum application style (both variants)
   wallpapers.py       wallpaper packages
   icons.py            launcher emblem icon theme
   cursors.py          cursor composition and Xcursor writer
@@ -232,7 +263,7 @@ khtheme/
 tools/
   preview.py          offscreen renders of the built theme
   cursorsheet.py      contact sheet of a built cursor theme
-  widgetgallery.py    widgets in one colour scheme
+  widgetgallery.py    widgets in one colour scheme and style
   nestedkwin.py       the decoration under a private headless KWin
 dist/                 build output (generated)
 ```
@@ -246,9 +277,9 @@ The tools write one JSON object per line to stderr with `timestamp`, `level`,
 
 ## Notes
 
-- Application widgets (buttons, tabs, scroll bars) are drawn by Breeze in this
-  theme's colours. Giving them the command-menu shapes too needs a widget
-  style engine such as Kvantum, which is not included.
+- The application style covers Qt applications (QtQuick ones too, through
+  Plasma's desktop style, which paints with the active widget style). GTK
+  applications are not covered.
 - Text beam, resize arrows and grab hands have no counterpart in the games;
   they are drawn to match the menu glove (white with a dark outline). Cursor
   shapes not produced here fall back to Breeze's.
