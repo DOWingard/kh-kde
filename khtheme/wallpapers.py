@@ -37,12 +37,14 @@ class Wallpaper:
 
 
 WALLPAPERS = (
-    Wallpaper("roxas-black-coat", "Kingdom Hearts — Roxas in the Black Coat", ORG_XIII.key, default=True),
+    Wallpaper("dive-to-the-heart", "Kingdom Hearts — Dive to the Heart", ORG_XIII.key, default=True),
+    Wallpaper("roxas-black-coat", "Kingdom Hearts — Roxas in the Black Coat", ORG_XIII.key),
     Wallpaper("heart-moon", "Kingdom Hearts — The Heart-Shaped Moon", ORG_XIII.key),
     Wallpaper("black-coat", "Kingdom Hearts — Black Coat at Dawn", ORG_XIII.key),
     Wallpaper("roxas-rain", "Kingdom Hearts — Roxas in the Rain", ORG_XIII.key),
     Wallpaper("menu-pattern", "Kingdom Hearts — Menu Pattern", ORG_XIII.key),
-    Wallpaper("destiny-islands", "Kingdom Hearts — Destiny Islands", SORA.key, default=True),
+    Wallpaper("final-mix-trio", "Kingdom Hearts — Sora, Donald and Goofy", SORA.key, default=True),
+    Wallpaper("destiny-islands", "Kingdom Hearts — Destiny Islands", SORA.key),
     Wallpaper("final-world", "Kingdom Hearts — The Final World", SORA.key),
     Wallpaper("sora-islands", "Kingdom Hearts — Sora on the Islands", SORA.key),
 )
@@ -111,8 +113,12 @@ def _build_one(out: Path, wallpaper: Wallpaper) -> Path:
     width, height = _source_size(source)
     # Never enlarge: a size above the artwork's own adds bytes, not detail.
     # The smallest size is always written so every package has a picture.
-    sizes = [s for s in SIZES if s[0] <= width and s[1] <= height] or [SIZES[-1]]
-    if len(sizes) < len(SIZES):
+    sizes = [s for s in SIZES if s[0] <= width and s[1] <= height]
+    if not sizes:
+        sizes = [SIZES[-1]]
+        log.warn("wallpapers", "artwork is smaller than the smallest size and is enlarged to fit; it will look soft",
+                 wallpaper=wallpaper.slug, source=f"{width}x{height}", written=f"{sizes[0][0]}x{sizes[0][1]}")
+    elif len(sizes) < len(SIZES):
         log.info("wallpapers", "artwork is smaller than the largest size; skipping upscales",
                  wallpaper=wallpaper.slug, source=f"{width}x{height}", written=[f"{w}x{h}" for w, h in sizes])
     for w, h in sizes:

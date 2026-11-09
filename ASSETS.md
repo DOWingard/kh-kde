@@ -67,10 +67,13 @@ build trims and levels them. The event mapping is in `khtheme/sounds.py`.
 ## `assets/wallpapers/`
 
 Each file is the source cropped to 16:9, scaled to at most 3840×2160 and saved
-as JPEG.
+as JPEG. The two default pictures are the exception: they were supplied by the
+theme's owner and are stored exactly as received.
 
 | File | What it shows | Kind | Source |
 | --- | --- | --- | --- |
+| `dive-to-the-heart.jpg` | Sora falling across a stained-glass Station of Awakening, star field (dark default) | fan wallpaper, artist not identified (signed bottom right) | supplied by the owner as `wp2734365-kh-wallpaper.jpg`, wallpapercave.com id `wp2734365` |
+| `final-mix-trio.jpg` | Sora, Donald and Goofy over the crown-and-emblem pattern (light default) | official character art in a wallpaper layout | supplied by the owner as `861243-3840x2160-desktop-4k-kingdom-hearts-final-mix-wallpaper-photo.jpg` |
 | `roxas-black-coat.jpg` | Roxas in the black coat (KH3 opening) | official CG | <https://www.khwiki.com/File:Opening_11_KHIII.png> |
 | `roxas-rain.jpg` | Roxas dual-wielding in the rain (KH3 opening) | official CG | <https://www.khwiki.com/File:Opening_23_KHIII.png> |
 | `heart-moon.jpg` | The heart-shaped moon, Master Xehanort before it | KH3 in-game capture | <https://wall.alphacoders.com/big.php?i=1188048> |
@@ -79,3 +82,8 @@ as JPEG.
 | `destiny-islands.jpg` | Destiny Islands concept art (first game) | official artwork | <https://www.khwiki.com/File:Destiny_Islands_(Art).png> |
 | `sora-islands.jpg` | Sora in his first outfit on Destiny Islands (KH3 opening) | official CG | <https://www.khwiki.com/File:Opening_05_KHIII.png> |
 | `final-world.jpg` | Sora in the Final World | fan art by 星宮あき | <https://wall.alphacoders.com/big.php?i=1033224> |
+
+`dive-to-the-heart.jpg` is 1440×900, smaller than a 1920×1080 screen, so the
+build enlarges it by a third and trims 45 source rows from the top and the
+bottom to reach 16:9; that trim removes the artist's signature and the last
+caption line. A search for a larger copy of the same picture found none.
