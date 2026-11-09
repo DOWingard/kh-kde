@@ -25,6 +25,8 @@ Item {
     property QtObject decorationSettings: QtObject {
         property bool closeOnDoubleClickOnMenu: false
         property int borderSize: 3
+        // The preview shows every button, so every action counts as available.
+        property bool onAllDesktopsAvailable: true
     }
 
     width: frame.item ? frame.item.width : 0
@@ -45,6 +47,9 @@ Item {
             property bool onAllDesktops: false
             property bool keepAbove: false
             property bool keepBelow: false
+            property bool shadeable: true
+            property bool providesContextHelp: true
+            property bool hasApplicationMenu: false
         }
         readonly property QtObject sides: frame.item ? (win.maximized ? frame.item.maximizedBorders : frame.item.borders) : null
         property int borderLeft: sides ? sides.left : 0
