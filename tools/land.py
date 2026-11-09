@@ -6,9 +6,11 @@
 The default branch accepts only commits whose "build and test" check has
 passed, so a plain `git push origin main` of an untested commit is refused.
 This pushes HEAD to a temporary land/<commit> branch, waits for CI on it,
-then pushes the same commit to main and deletes the temporary branch. HEAD
-must be committed and contain origin/main (rebase first if not). Needs an
-authenticated `gh`.
+then pushes the same commit to main and deletes the temporary branch. Once
+landed, the temporary branch's CI run is deleted too (main runs CI on the
+commit itself), so the Actions list names no branch that is gone; a failed
+run is kept for its logs. HEAD must be committed and contain origin/main
+(rebase first if not). Needs an authenticated `gh`.
 """
 
 from __future__ import annotations
@@ -92,6 +94,10 @@ def main() -> int:
         log.info("land", "CI passed; landing on main", duration_s=duration)
         run(["git", "push", "--quiet", "origin", f"{commit}:refs/heads/{MAIN}"], "push to main")
         log.info("land", "landed", commit=commit[:12], branch=MAIN)
+        try:
+            run(["gh", "run", "delete", str(ci["databaseId"])], "delete the temporary branch's CI run")
+        except LandError:
+            log.warn("land", "the temporary branch's CI run is still listed; delete it on GitHub", run=ci["url"])
         return 0
     except LandError as exc:
         log.error("land", "not landed", error=exc)
