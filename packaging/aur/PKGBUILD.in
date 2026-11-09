@@ -14,6 +14,7 @@ depends=(
   'kconfig'
   'kcoreaddons'
   'libplasma'
+  'plasma-desktop'
   'plasma-workspace'
   'python'
   'qt6-base'
