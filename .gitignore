@@ -3,3 +3,4 @@ CONTEXT/
 dist/
 __pycache__/
 *.pyc
+graphify-out/
