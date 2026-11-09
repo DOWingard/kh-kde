@@ -2,14 +2,18 @@
 """Render a window of common widgets in one colour scheme, off screen.
 
     widgetgallery.py <scheme.colors> <out.png>
+    widgetgallery.py <scheme.colors> <out.png> --kvantum dist/Kvantum/KingdomHearts --style kvantum-dark
 
-The scheme is read by the Breeze style at start-up, so this runs as its own
-process with a throw-away configuration directory holding only that scheme.
+The scheme (and, with --kvantum, the Kvantum theme folder) is read at start-up,
+so this runs as its own process with a throw-away configuration directory
+holding only those. A menu with a highlighted row is drawn beside the window.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -19,110 +23,211 @@ sys.path.insert(0, str(ROOT))
 
 from khtheme import log  # noqa: E402
 
+KEYS = ["Kingdom Key", "Oathkeeper", "Oblivion", "Bond of Flame", "Two Become One", "Ultima Weapon",
+        "Star Seeker", "Hidden Dragon", "Hero's Crest", "Monochrome", "Follow the Wind", "Circle of Life",
+        "Photon Debugger", "Gull Wing", "Rumbling Rose", "Guardian Soul", "Wishing Lamp", "Decisive Pumpkin"]
+
+
+def build_gallery(widgets):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QAction
+    W = widgets
+
+    window = W.QWidget()
+    window.resize(900, 520)
+    outer = W.QVBoxLayout(window)
+
+    bar = W.QToolBar()
+    bar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    for n, label in enumerate(["Items", "Abilities", "Party"]):
+        action = QAction(label, bar)
+        action.setCheckable(True)
+        action.setChecked(n == 1)
+        bar.addAction(action)
+    bar.addSeparator()
+    menu_button = W.QToolButton()
+    menu_button.setText("Journal")
+    menu_button.setPopupMode(W.QToolButton.ToolButtonPopupMode.InstantPopup)
+    menu_button.setMenu(W.QMenu(menu_button))
+    bar.addWidget(menu_button)
+    outer.addWidget(bar)
+
+    tabs = W.QTabWidget()
+    page = W.QWidget()
+    tabs.addTab(page, "Abilities")
+    tabs.addTab(W.QWidget(), "Items")
+    tabs.addTab(W.QWidget(), "Config")
+    row = W.QHBoxLayout(page)
+
+    left = W.QVBoxLayout()
+    keys = W.QListWidget()
+    keys.addItems(KEYS)
+    keys.setCurrentRow(1)
+    keys.setAlternatingRowColors(True)
+    left.addWidget(keys, 3)
+    table = W.QTreeWidget()
+    table.setHeaderLabels(["Ability", "AP", "World"])
+    for name, ap, world in (("Scan", "1", "Traverse Town"), ("Guard", "2", "Hollow Bastion"),
+                            ("Dodge Roll", "3", "Destiny Islands"), ("Aerial Recovery", "2", "Agrabah")):
+        item = W.QTreeWidgetItem([name, ap, world])
+        item.setCheckState(0, Qt.CheckState.Checked if ap != "3" else Qt.CheckState.Unchecked)
+        table.addTopLevelItem(item)
+    table.setCurrentItem(table.topLevelItem(1))
+    left.addWidget(table, 2)
+    row.addLayout(left, 1)
+
+    side = W.QVBoxLayout()
+    group = W.QGroupBox("Equip")
+    form = W.QVBoxLayout(group)
+    form.addWidget(W.QLineEdit("Roxas"))
+    edit = W.QComboBox()
+    edit.setEditable(True)
+    edit.addItems(["Twilight Town", "The World That Never Was"])
+    form.addWidget(edit)
+    combo = W.QComboBox()
+    combo.addItems(["Valor", "Wisdom", "Master", "Final"])
+    form.addWidget(combo)
+    checks = W.QHBoxLayout()
+    auto = W.QCheckBox("Auto Limit")
+    auto.setChecked(True)
+    checks.addWidget(auto)
+    checks.addWidget(W.QCheckBox("Scan"))
+    tri = W.QCheckBox("Partial")
+    tri.setTristate(True)
+    tri.setCheckState(Qt.CheckState.PartiallyChecked)
+    checks.addWidget(tri)
+    off = W.QCheckBox("Locked")
+    off.setChecked(True)
+    off.setEnabled(False)
+    checks.addWidget(off)
+    form.addLayout(checks)
+    radios = W.QHBoxLayout()
+    standard = W.QRadioButton("Standard")
+    standard.setChecked(True)
+    radios.addWidget(standard)
+    radios.addWidget(W.QRadioButton("Proud"))
+    critical = W.QRadioButton("Critical")
+    critical.setEnabled(False)
+    radios.addWidget(critical)
+    form.addLayout(radios)
+    slider = W.QSlider(Qt.Orientation.Horizontal)
+    slider.setValue(60)
+    form.addWidget(slider)
+    progress = W.QProgressBar()
+    progress.setValue(72)
+    form.addWidget(progress)
+    spins = W.QHBoxLayout()
+    spin = W.QSpinBox()
+    spin.setValue(13)
+    spins.addWidget(spin)
+    spins.addWidget(W.QLabel('<a href="#">A link</a>'))
+    form.addLayout(spins)
+    side.addWidget(group)
+
+    buttons = W.QHBoxLayout()
+    disabled = W.QPushButton("Disabled")
+    disabled.setEnabled(False)
+    held = W.QPushButton("Held")
+    held.setDown(True)
+    confirm = W.QPushButton("Confirm")
+    confirm.setDefault(True)
+    buttons.addWidget(disabled)
+    buttons.addWidget(held)
+    buttons.addStretch()
+    buttons.addWidget(W.QPushButton("Cancel"))
+    buttons.addWidget(confirm)
+    side.addLayout(buttons)
+    row.addLayout(side, 1)
+    outer.addWidget(tabs)
+
+    menu = W.QMenu()
+    menu.addAction("Attack")
+    magic = menu.addMenu("Magic")
+    magic.addAction("Fire")
+    highlighted = menu.addAction("Items")
+    menu.addSeparator()
+    summon = menu.addAction("Summon")
+    summon.setCheckable(True)
+    summon.setChecked(True)
+    menu.addAction("Drive").setEnabled(False)
+    menu.setActiveAction(highlighted)
+
+    keys.setFocus()
+    return window, menu, (keys, table)
+
 
 def main() -> int:
-    if len(sys.argv) != 3:
-        log.error("widgetgallery", "usage: widgetgallery.py <scheme.colors> <out.png>")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("scheme", type=Path)
+    parser.add_argument("target", type=Path)
+    parser.add_argument("--kvantum", type=Path, help="Kvantum theme folder to load")
+    parser.add_argument("--style", default="Breeze", help="Qt style key, e.g. kvantum or kvantum-dark")
+    args = parser.parse_args()
+    if not args.scheme.is_file():
+        log.error("widgetgallery", "colour scheme not found", path=str(args.scheme))
         return 2
-    scheme, target = Path(sys.argv[1]), Path(sys.argv[2])
-    if not scheme.is_file():
-        log.error("widgetgallery", "colour scheme not found", path=str(scheme))
+    if args.kvantum and not args.kvantum.is_dir():
+        log.error("widgetgallery", "kvantum theme folder not found", path=str(args.kvantum))
         return 2
+
     with tempfile.TemporaryDirectory(prefix="khgallery-") as config:
         Path(config, "kdeglobals").write_text(
-            scheme.read_text(encoding="utf-8") + "\n[KDE]\nwidgetStyle=Breeze\n", encoding="utf-8"
+            args.scheme.read_text(encoding="utf-8") + f"\n[KDE]\nwidgetStyle={args.style}\n", encoding="utf-8"
         )
+        if args.kvantum:
+            target = Path(config, "Kvantum", args.kvantum.name)
+            shutil.copytree(args.kvantum, target)
+            Path(config, "Kvantum", "kvantum.kvconfig").write_text(
+                f"[General]\ntheme={args.kvantum.name}\n", encoding="utf-8"
+            )
         os.environ["XDG_CONFIG_HOME"] = config
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
         # The offscreen platform loads no desktop integration by itself; without
         # Plasma's platform theme Qt falls back to Fusion and ignores the scheme.
         os.environ["QT_QPA_PLATFORMTHEME"] = "kde"
-        os.environ.pop("QT_STYLE_OVERRIDE", None)
+        os.environ["QT_STYLE_OVERRIDE"] = args.style
         try:
-            from PyQt6.QtCore import Qt, QTimer
-            from PyQt6.QtWidgets import (
-                QApplication, QCheckBox, QComboBox, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                QProgressBar, QPushButton, QRadioButton, QSlider, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
-            )
+            from PyQt6 import QtWidgets
+            from PyQt6.QtCore import QPoint, QTimer
+            from PyQt6.QtGui import QColor, QImage, QPainter
         except ImportError as exc:
             log.error("widgetgallery", "PyQt6 is required", error=exc)
             return 2
 
-        app = QApplication(sys.argv[:1])
-        window = QWidget()
-        window.resize(760, 440)
-        outer = QVBoxLayout(window)
-        tabs = QTabWidget()
-        page = QWidget()
-        tabs.addTab(page, "Abilities")
-        tabs.addTab(QWidget(), "Items")
-        tabs.addTab(QWidget(), "Config")
-        row = QHBoxLayout(page)
-
-        keys = QListWidget()
-        keys.addItems(["Kingdom Key", "Oathkeeper", "Oblivion", "Bond of Flame", "Two Become One", "Ultima Weapon"])
-        keys.setCurrentRow(1)
-        keys.setAlternatingRowColors(True)
-        row.addWidget(keys, 1)
-
-        side = QVBoxLayout()
-        group = QGroupBox("Equip")
-        form = QVBoxLayout(group)
-        form.addWidget(QLineEdit("Roxas"))
-        combo = QComboBox()
-        combo.addItems(["Valor", "Wisdom", "Master", "Final"])
-        form.addWidget(combo)
-        auto = QCheckBox("Auto Limit")
-        auto.setChecked(True)
-        form.addWidget(auto)
-        form.addWidget(QCheckBox("Scan"))
-        standard = QRadioButton("Standard")
-        standard.setChecked(True)
-        form.addWidget(standard)
-        form.addWidget(QRadioButton("Proud"))
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setValue(60)
-        form.addWidget(slider)
-        progress = QProgressBar()
-        progress.setValue(72)
-        form.addWidget(progress)
-        spin = QSpinBox()
-        spin.setValue(13)
-        form.addWidget(spin)
-        form.addWidget(QLabel('<a href="#">A link</a> &nbsp; <a href="#v">plain text</a>'))
-        side.addWidget(group)
-        buttons = QHBoxLayout()
-        disabled = QPushButton("Disabled")
-        disabled.setEnabled(False)
-        confirm = QPushButton("Confirm")
-        confirm.setDefault(True)
-        buttons.addWidget(disabled)
-        buttons.addStretch()
-        buttons.addWidget(QPushButton("Cancel"))
-        buttons.addWidget(confirm)
-        side.addLayout(buttons)
-        row.addLayout(side, 1)
-        outer.addWidget(tabs)
-
+        app = QtWidgets.QApplication(sys.argv[:1])
+        window, menu, _views = build_gallery(QtWidgets)
         window.show()
-        keys.setFocus()
+        menu.popup(QPoint(0, 0))
         result = {"ok": False}
 
         def shoot() -> None:
-            image = window.grab()
-            target.parent.mkdir(parents=True, exist_ok=True)
-            result["ok"] = image.save(str(target))
+            shot = window.grab().toImage()
+            popup = menu.grab().toImage()
+            gap = 24
+            canvas = QImage(shot.width() + gap + popup.width() + gap, max(shot.height(), popup.height() + gap),
+                            QImage.Format.Format_ARGB32)
+            canvas.fill(QColor(window.palette().color(window.backgroundRole())).darker(115))
+            painter = QPainter(canvas)
+            painter.drawImage(0, 0, shot)
+            painter.drawImage(shot.width() + gap, gap, popup)
+            painter.end()
+            args.target.parent.mkdir(parents=True, exist_ok=True)
+            result["ok"] = canvas.save(str(args.target))
             result["style"] = app.style().objectName()
             app.quit()
 
-        QTimer.singleShot(900, shoot)
+        QTimer.singleShot(1200, shoot)
         app.exec()
+
     if not result["ok"]:
-        log.error("widgetgallery", "could not save the render", target=str(target))
+        log.error("widgetgallery", "could not save the render", target=str(args.target))
         return 1
-    if result.get("style", "").lower() != "breeze":
-        log.warn("widgetgallery", "Breeze style was not used; colours may not be representative", style=result.get("style"))
-    log.info("widgetgallery", "rendered", target=str(target), style=result.get("style"))
+    wanted = args.style.lower()
+    if result.get("style", "").lower() != wanted:
+        log.warn("widgetgallery", "the requested style was not used; the render is not representative",
+                 wanted=args.style, used=result.get("style"))
+        return 1
+    log.info("widgetgallery", "rendered", target=str(args.target), style=result.get("style"))
     return 0
 
 

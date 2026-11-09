@@ -5,7 +5,7 @@ The Plasma Style is drawn through KSvg (the library Plasma itself uses), so
 slice bounds, margins and shadows are checked exactly as the shell would see
 them. The window decoration, splash and login screens are loaded as QML against
 stand-ins for the objects KWin and SDDM provide. Cursors are read back from the
-packed cursor files; widgets are drawn by the Breeze style in each colour scheme.
+packed cursor files; widgets are drawn by the real Kvantum engine with the built theme.
 
     ./tools/preview.py                 # everything, both variants
     ./tools/preview.py --only splash   # plasmastyle | decoration | splash | sddm | cursors | widgets
@@ -26,7 +26,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cursorsheet  # noqa: E402
-from khtheme import log, wallpapers  # noqa: E402
+from khtheme import kvantum, log, wallpapers  # noqa: E402
 from khtheme.colorscheme import scheme_id  # noqa: E402
 from khtheme.palette import VARIANTS, Palette  # noqa: E402
 
@@ -73,7 +73,8 @@ def render_widgets(pal: Palette) -> bool:
     try:
         result = subprocess.run(
             [sys.executable, str(Path(__file__).resolve().parent / "widgetgallery.py"), str(scheme),
-             str(OUT / f"widgets-{pal.key}.png")],
+             str(OUT / f"widgets-{pal.key}.png"), "--kvantum", str(DIST / "Kvantum" / kvantum.THEME),
+             "--style", kvantum.style_key(pal)],
             timeout=120,
         )
     except subprocess.TimeoutExpired as exc:
