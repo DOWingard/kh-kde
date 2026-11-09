@@ -33,6 +33,7 @@ COMPONENTS = [
     "konsole",
     "fonts",
     "sounds",
+    "kvantum",
     "lookandfeel",
     "sddm",
 ]
