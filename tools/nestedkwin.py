@@ -17,6 +17,11 @@ title-bar rectangle KWin holds for it, and every point of the top bar outside
 the thin strip along the window edge has to count as title bar. A title bar
 that KWin places wrongly makes the whole bar, buttons included, show the
 resize cursor.
+
+Last, it checks which title-bar buttons are drawn. The session asks for the
+help and "on all desktops" buttons, which can do nothing for a Wayland window
+on a single desktop, so neither may appear; after a second desktop is added,
+"on all desktops" has to come back.
 Requires kwin_wayland, dbus-run-session, spectacle and PyQt6.
 """
 
@@ -41,7 +46,7 @@ from khtheme.palette import VARIANTS, Palette  # noqa: E402
 DIST = ROOT / "dist"
 OUT = ROOT / "CONTEXT" / "tmp" / "previews"
 SIZE = (1280, 720)
-TOOLS = ["kwin_wayland", "dbus-run-session", "spectacle"]
+TOOLS = ["kwin_wayland", "dbus-run-session", "spectacle", "qdbus6"]
 
 CLIENT = """import sys
 from PyQt6.QtCore import QTimer
@@ -60,29 +65,65 @@ for title, maximised in (("World Map", True), ("Dive to the Heart", False), ("Jo
     else:
         window.show()
     windows.append(window)
-QTimer.singleShot(9000, app.quit)
+QTimer.singleShot(12000, app.quit)
 app.exec()
 """
 WINDOWS = 3
 
 # Appended to the copy of the decoration under test (never to the built one):
-# reports the geometry KWin ended up with, once the window has settled.
+# reports the geometry KWin ended up with once the window has settled, and the
+# buttons drawn, once before and once after the session adds a second desktop.
 PROBE_TAG = "KHPROBE "
 PROBE = """
-    Timer {
-        interval: 2500
-        running: true
-        onTriggered: console.warn("%s" + JSON.stringify({
-            "caption": decoration.client.caption,
-            "maximized": decoration.client.maximized,
-            "clientWidth": decoration.client.width,
-            "titleBar": [decoration.titleBar.x, decoration.titleBar.y, decoration.titleBar.width, decoration.titleBar.height],
-            "borders": [decoration.borderLeft, decoration.borderTop, decoration.borderRight, decoration.borderBottom],
-            "grips": [decoration.resizeOnlyBorderLeft, decoration.resizeOnlyBorderTop,
-                      decoration.resizeOnlyBorderRight, decoration.resizeOnlyBorderBottom]
-        }))
+    function khProbeButtons(types) {
+        const names = {};
+        names[DecorationOptions.DecorationButtonMenu] = "menu";
+        names[DecorationOptions.DecorationButtonApplicationMenu] = "appmenu";
+        names[DecorationOptions.DecorationButtonOnAllDesktops] = "alldesktops";
+        names[DecorationOptions.DecorationButtonQuickHelp] = "help";
+        names[DecorationOptions.DecorationButtonMinimize] = "minimize";
+        names[DecorationOptions.DecorationButtonMaximizeRestore] = "maximize";
+        names[DecorationOptions.DecorationButtonKeepAbove] = "keepabove";
+        names[DecorationOptions.DecorationButtonKeepBelow] = "keepbelow";
+        names[DecorationOptions.DecorationButtonShade] = "shade";
+        names[DecorationOptions.DecorationButtonClose] = "close";
+        names[DecorationOptions.DecorationButtonExplicitSpacer] = "spacer";
+        return types.map(t => names[t] || ("type" + t));
     }
-""" % PROBE_TAG
+    property int khProbeRound: 0
+    Timer {
+        interval: %d
+        running: true
+        repeat: true
+        onTriggered: {
+            root.khProbeRound += 1;
+            if (root.khProbeRound >= 2) {
+                stop();
+            }
+            console.warn("%s" + JSON.stringify({
+                "round": root.khProbeRound,
+                "caption": decoration.client.caption,
+                "maximized": decoration.client.maximized,
+                "clientWidth": decoration.client.width,
+                "titleBar": [decoration.titleBar.x, decoration.titleBar.y, decoration.titleBar.width, decoration.titleBar.height],
+                "borders": [decoration.borderLeft, decoration.borderTop, decoration.borderRight, decoration.borderBottom],
+                "grips": [decoration.resizeOnlyBorderLeft, decoration.resizeOnlyBorderTop,
+                          decoration.resizeOnlyBorderRight, decoration.resizeOnlyBorderBottom],
+                "left": root.khProbeButtons(leftButtons.shown()),
+                "right": root.khProbeButtons(rightButtons.shown())
+            }));
+        }
+    }
+"""
+# Rounds of the probe are this far apart; the session adds the second desktop
+# between them.
+PROBE_INTERVAL_MS = 4000
+PROBE = PROBE % (PROBE_INTERVAL_MS, PROBE_TAG)
+
+# Buttons the session asks for: KDE's default layout, which includes the two
+# that only sometimes have a function.
+LAYOUT = ("MS", "HIAX")
+ALWAYS = {"left": ["menu"], "right": ["minimize", "maximize", "close"]}
 
 SESSION = """#!/bin/sh
 export QT_QPA_PLATFORM=wayland
@@ -90,6 +131,9 @@ export QT_QPA_PLATFORM=wayland
 sleep 5
 spectacle -b -n -f -o "{work}/shot.png" >"{work}/spectacle.log" 2>&1
 sleep 1
+qdbus6 org.kde.KWin /VirtualDesktopManager org.kde.KWin.VirtualDesktopManager.createDesktop 1 "Second" \\
+    >"{work}/desktop.log" 2>&1
+sleep 6
 """
 
 
@@ -149,6 +193,7 @@ def resizing_share(probe: dict) -> tuple[float, list[tuple[int, int]]]:
 
 
 def check_sections(pal: Palette, probes: list[dict]) -> bool:
+    probes = [p for p in probes if p.get("round") == 1]
     if len(probes) != WINDOWS:
         log.error("nestedkwin", "not every test window reported its title bar", variant=pal.key,
                   expected=WINDOWS, reported=len(probes))
@@ -168,6 +213,38 @@ def check_sections(pal: Palette, probes: list[dict]) -> bool:
     return ok
 
 
+def check_buttons(pal: Palette, probes: list[dict]) -> bool:
+    """Round 1 runs on one desktop, round 2 after a second one was added."""
+    ok = True
+    for round_no, want_desktops in ((1, False), (2, True)):
+        batch = [p for p in probes if p.get("round") == round_no]
+        if len(batch) != WINDOWS:
+            log.error("nestedkwin", "not every test window reported its buttons", variant=pal.key,
+                      round=round_no, expected=WINDOWS, reported=len(batch))
+            ok = False
+            continue
+        for probe in batch:
+            drawn = {"left": probe["left"], "right": probe["right"]}
+            problems = []
+            if "help" in drawn["left"] + drawn["right"]:
+                problems.append("help is drawn though no Wayland window can offer it")
+            has_desktops = "alldesktops" in drawn["left"] + drawn["right"]
+            if has_desktops != want_desktops:
+                problems.append("'on all desktops' is " + ("missing with two desktops" if want_desktops
+                                                            else "drawn with only one desktop"))
+            for side, names in ALWAYS.items():
+                if [n for n in drawn[side] if n in names] != names:
+                    problems.append(f"{side} side lacks {names}")
+            fields = dict(variant=pal.key, round=round_no, window=probe["caption"], left=drawn["left"],
+                          right=drawn["right"])
+            if problems:
+                ok = False
+                log.error("nestedkwin", "wrong title-bar buttons", problems=problems, **fields)
+            else:
+                log.info("nestedkwin", "title-bar buttons match what the window can do", **fields)
+    return ok
+
+
 def check(pal: Palette) -> bool:
     package = DIST / "kwin" / "decorations" / pal.decoration_id
     if not package.is_dir():
@@ -184,7 +261,9 @@ def check(pal: Palette) -> bool:
             log.error("nestedkwin", "could not add the geometry probe", error=exc, variant=pal.key)
             return False
         (work / "config" / "kwinrc").write_text(
-            f"[org.kde.kdecoration2]\nlibrary=org.kde.kwin.aurorae\ntheme={pal.decoration_id}\n", encoding="utf-8"
+            f"[org.kde.kdecoration2]\nlibrary=org.kde.kwin.aurorae\ntheme={pal.decoration_id}\n"
+            f"ButtonsOnLeft={LAYOUT[0]}\nButtonsOnRight={LAYOUT[1]}\n\n[Desktops]\nNumber=1\nRows=1\n",
+            encoding="utf-8",
         )
         client = work / "client.py"
         client.write_text(CLIENT, encoding="utf-8")
@@ -216,7 +295,13 @@ def check(pal: Palette) -> bool:
                 return False
         notes = [ln for ln in result.stderr.splitlines()
                  if PROBE_TAG not in ln and (".qml" in ln or "aurorae" in ln.lower())]
-        sections_ok = check_sections(pal, read_probes(result.stderr))
+        probes = read_probes(result.stderr)
+        sections_ok = check_sections(pal, probes)
+        buttons_ok = check_buttons(pal, probes)
+        desktop_log = work / "desktop.log"
+        if desktop_log.is_file() and desktop_log.read_text(encoding="utf-8", errors="replace").strip():
+            log.debug("nestedkwin", "desktop request output", variant=pal.key,
+                      output=desktop_log.read_text(encoding="utf-8", errors="replace")[-400:])
         if notes:
             log.warn("nestedkwin", "the decoration engine reported problems", variant=pal.key, lines=notes[:12])
         shot = work / "shot.png"
@@ -237,7 +322,7 @@ def check(pal: Palette) -> bool:
         target = OUT / f"kwin-{pal.key}.png"
         shutil.copyfile(shot, target)
         log.info("nestedkwin", "decoration rendered by KWin", variant=pal.key, target=str(target), engine_notes=len(notes))
-    return not notes and sections_ok
+    return not notes and sections_ok and buttons_ok
 
 
 def main() -> int:
