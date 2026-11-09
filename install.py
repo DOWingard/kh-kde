@@ -5,6 +5,7 @@
     ./install.py apply OrgXIII      switch the desktop to a variant (OrgXIII | Sora)
     ./install.py revert             restore the settings saved before the first apply
     ./install.py status             show what is installed and what is active
+    ./install.py keyblade [<name>]  list the pointer keyblades, or point with one
     ./install.py uninstall          remove every installed file (revert first)
     ./install.py sddm               print the root commands that install the login theme
 
@@ -27,7 +28,7 @@ import sys
 import time
 from pathlib import Path
 
-from khtheme import kvantum, log, wallpapers
+from khtheme import kvantum, log, picker, wallpapers
 from khtheme.colorscheme import scheme_id
 from khtheme.palette import ORG_XIII, SORA, VARIANTS, Palette
 from khtheme.sounds import THEME_ID as SOUND_THEME
@@ -74,6 +75,21 @@ STANDIN_CURSORS = "breeze_cursors"
 # Locations earlier versions installed into; our entries there are removed.
 LEGACY_TREES = [DATA / "aurorae" / "themes"]
 
+# The Keyblade Browser plugin gets a folder of its own, which the Plasma
+# session puts on QT_PLUGIN_PATH through a login script.
+OWN_DATA = DATA / "kingdom-hearts-plasma"
+PLUGIN_ROOT = OWN_DATA / "plugins"
+PLUGIN = PLUGIN_ROOT / picker.NAMESPACE / f"{picker.PLUGIN_ID}.so"
+ENV_SCRIPT = CONFIG / "plasma-workspace" / "env" / "kingdom-hearts-plasma.sh"
+KEYBLADE_RC = CONFIG / "kingdom-hearts-plasmarc"
+SHELL_SERVICE = "plasma-plasmashell.service"
+# What KWin does with Super + right click. Its default, resizing, swallows the
+# click even on the desktop. This one activates the window under the pointer
+# (the desktop too) and passes the click on, so the shell both gets the click
+# and, having keyboard focus, sees the Super key held.
+PASS_CLICK = "Activate, raise and pass click"
+SHELL_WAIT = 20.0
+
 # (config file, group path, key) read through the KDE config cascade.
 SETTINGS = {
     "lookandfeel": ("kdeglobals", ["KDE"], "LookAndFeelPackage"),
@@ -94,6 +110,8 @@ SETTINGS = {
     "lock_plugin": ("kscreenlockerrc", ["Greeter"], "WallpaperPlugin"),
     "lock_image": ("kscreenlockerrc", ["Greeter", "Wallpaper", "org.kde.image", "General"], "Image"),
     "lock_preview": ("kscreenlockerrc", ["Greeter", "Wallpaper", "org.kde.image", "General"], "PreviewImage"),
+    "meta_right_window": ("kwinrc", ["MouseBindings"], "CommandAll3"),
+    "meta_right_desktop": ("plasma-org.kde.plasma.desktop-appletsrc", ["ActionPlugins", "0"], "RightButton;MetaModifier"),
 }
 CONFIG_FILES = ["kdeglobals", "kwinrc", "plasmarc", "kcminputrc", "ksplashrc", "kscreenlockerrc",
                 "plasma-org.kde.plasma.desktop-appletsrc"]
@@ -219,11 +237,44 @@ def cmd_install(_args) -> int:
                 except OSError as exc:
                     log.warn("install", "could not remove an outdated entry", error=exc, path=str(entry))
     pruned += remove_legacy()
+    if not install_keyblade_browser():
+        return 1
     clear_caches()
     refresh_icons()
     refresh_fonts()
     log.info("install", "themes installed", entries=copied, outdated_removed=pruned, data_dir=str(DATA))
     return 0
+
+
+def install_keyblade_browser() -> bool:
+    """Install the plugin and the login script that lets the shell find it,
+    then put back the keyblade chosen before (the cursors were just replaced)."""
+    source = picker.plugin_file(DIST)
+    if not source.is_file():
+        log.warn("install", "keyblade browser not built; skipped", expected=str(source), hint="./build.py --only picker")
+        return True
+    try:
+        PLUGIN.parent.mkdir(parents=True, exist_ok=True)
+        # Copied aside and renamed: a running shell has the old file mapped,
+        # and overwriting it in place would crash the shell.
+        staged = PLUGIN.with_suffix(".so.new")
+        shutil.copy2(source, staged)
+        os.replace(staged, PLUGIN)
+        ENV_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+        ENV_SCRIPT.write_text(
+            "# Lets the Plasma shell find the Keyblade Browser mouse action (Kingdom Hearts theme).\n"
+            f'case ":${{QT_PLUGIN_PATH}}:" in\n  *":{PLUGIN_ROOT}:"*) ;;\n'
+            f'  *) export QT_PLUGIN_PATH="{PLUGIN_ROOT}${{QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}}" ;;\nesac\n',
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        log.error("install", "could not install the keyblade browser", error=exc, plugin=str(PLUGIN), script=str(ENV_SCRIPT))
+        return False
+    log.info("install", "keyblade browser installed", plugin=str(PLUGIN), login_script=str(ENV_SCRIPT))
+    tool = picker.cli(DIST)
+    if tool.is_file():
+        run([str(tool), "restore", "--no-reload"], "restore the chosen keyblade", check=False)
+    return True
 
 
 def remove_legacy() -> int:
@@ -293,6 +344,14 @@ def cmd_uninstall(_args) -> int:
                     log.error("install", "remove failed", error=exc, path=str(entry))
                     return 1
     removed += remove_legacy()
+    for path in (OWN_DATA, ENV_SCRIPT, KEYBLADE_RC):
+        if path.exists():
+            try:
+                remove_entry(path)
+                removed += 1
+            except OSError as exc:
+                log.error("install", "remove failed", error=exc, path=str(path))
+                return 1
     clear_caches()
     refresh_fonts()
     log.info("install", "themes removed", entries=removed)
@@ -345,6 +404,12 @@ def save_backup() -> None:
         if points_at_ours(value):
             settings[name] = earlier.get(name, "") if not points_at_ours(earlier.get(name, "")) else ""
             log.debug("install", "leftover setting replaced in backup", setting=name, restored=settings[name] or "<unset>")
+    # KWin's Super + right click setting names nothing of ours, but it is ours
+    # while the desktop binding that needs it is still in place.
+    if points_at_ours(read_setting(*SETTINGS["meta_right_desktop"])) and settings["meta_right_window"] == PASS_CLICK:
+        settings["meta_right_window"] = earlier.get("meta_right_window", "")
+        log.debug("install", "leftover setting replaced in backup", setting="meta_right_window",
+                  restored=settings["meta_right_window"] or "<unset>")
     # An earlier apply removed the accent colour; switching themes by hand does
     # not bring it back, so an unset accent is taken from the earlier backup.
     if not settings["accent"] and earlier.get("accent"):
@@ -476,6 +541,93 @@ def notify_style_change() -> None:
          "int32:2", "int32:0"], "notify applications of the widget style", check=False)
 
 
+def session_tool(cmd: list[str], what: str) -> subprocess.CompletedProcess | None:
+    """Run a session-management command; None when the tool is missing."""
+    try:
+        return run(cmd, what, check=False)
+    except StepError as exc:
+        log.warn("install", f"{what}: unavailable", error=exc)
+        return None
+
+
+def export_plugin_path() -> bool:
+    """Put the plugin folder on QT_PLUGIN_PATH of the running session, which the
+    login script only does from the next login on. True if it was added now."""
+    shown = session_tool(["systemctl", "--user", "show-environment"], "read the session environment")
+    if shown is None or shown.returncode != 0:
+        log.warn("install", "session environment unreadable; the keyblade browser loads after the next login")
+        return False
+    current = next((line.split("=", 1)[1] for line in shown.stdout.splitlines() if line.startswith("QT_PLUGIN_PATH=")), "")
+    parts = [part for part in current.split(":") if part]
+    if str(PLUGIN_ROOT) in parts:
+        return False
+    value = ":".join([str(PLUGIN_ROOT), *parts])
+    run(["systemctl", "--user", "set-environment", f"QT_PLUGIN_PATH={value}"], "add the plugin folder to the session")
+    log.info("install", "plugin folder added to the session environment", qt_plugin_path=value)
+    return True
+
+
+def shell_started_before(path: Path) -> bool:
+    """True when the running shell started before `path` last changed, so it
+    may hold an older copy of that plugin."""
+    shown = session_tool(["systemctl", "--user", "show", SHELL_SERVICE, "-p", "ExecMainStartTimestamp",
+                          "--timestamp=unix", "--value"], "read when the shell started")
+    try:
+        started = float(shown.stdout.strip().lstrip("@")) if shown is not None else None
+    except ValueError:
+        started = None
+    if started is None:
+        log.debug("install", "shell start time unknown", output=shown.stdout.strip() if shown else None)
+        return False
+    return path.stat().st_mtime > started
+
+
+def restart_shell() -> None:
+    """Restart the Plasma shell (desktop and panels) and wait until it is back.
+    It reads mouse actions and plugin folders only when it starts."""
+    state = session_tool(["systemctl", "--user", "is-active", SHELL_SERVICE], "check the shell service")
+    if state is None or state.stdout.strip() != "active":
+        log.warn("install", "the Plasma shell does not run as a systemd service; log out and in to load the change",
+                 service=SHELL_SERVICE)
+        return
+    run(["systemctl", "--user", "restart", SHELL_SERVICE], "restart the Plasma shell", timeout=90)
+    deadline = time.monotonic() + SHELL_WAIT
+    while time.monotonic() < deadline:
+        probe = session_tool(["qdbus6", "org.kde.plasmashell", "/PlasmaShell"], "wait for the shell")
+        if probe is not None and probe.returncode == 0:
+            log.info("install", "Plasma shell restarted")
+            return
+        time.sleep(0.5)
+    log.warn("install", "the Plasma shell did not come back on D-Bus in time", waited_s=SHELL_WAIT)
+
+
+def enable_keyblade_browser() -> None:
+    """Bind Super + right click on the desktop to the Keyblade Browser."""
+    if not PLUGIN.is_file():
+        log.warn("install", "keyblade browser not installed; Super + right click left as it was", expected=str(PLUGIN))
+        return
+    write_setting(*SETTINGS["meta_right_window"], PASS_CLICK)
+    bound = read_setting(*SETTINGS["meta_right_desktop"]) == picker.PLUGIN_ID
+    if not bound:
+        # The shell only writes this group from its own settings page, so it
+        # is safe to change while the shell runs; it is read on restart.
+        write_setting(*SETTINGS["meta_right_desktop"], picker.PLUGIN_ID)
+    added = export_plugin_path()
+    outdated = shell_started_before(PLUGIN)
+    if not bound or added or outdated:
+        log.info("install", "restarting the Plasma shell to load the keyblade browser",
+                 newly_bound=not bound, plugin_path_added=added, plugin_updated=outdated)
+        restart_shell()
+    log.info("install", "Super + right click on the desktop opens the keyblade browser", plugin=picker.PLUGIN_ID)
+
+
+def disable_keyblade_browser(saved: dict) -> None:
+    write_setting(*SETTINGS["meta_right_window"], saved.get("meta_right_window"))
+    if points_at_ours(read_setting(*SETTINGS["meta_right_desktop"])):
+        write_setting(*SETTINGS["meta_right_desktop"], saved.get("meta_right_desktop"))
+        restart_shell()
+
+
 def cmd_apply(args) -> int:
     pal = variant(args.variant)
     missing = missing_components(pal)
@@ -526,6 +678,7 @@ def cmd_apply(args) -> int:
             data.setdefault("konsole", previous)
             BACKUP.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
+    enable_keyblade_browser()
     reload_cursors(pal)
     reload_decoration(pal)
     notify_style_change()
@@ -586,6 +739,7 @@ def cmd_revert(_args) -> int:
         plasma_script(script, "restore wallpaper plugins")
 
     step("wallpaper", restore_wallpaper)
+    step("keyblade browser", lambda: disable_keyblade_browser(saved))
     if "konsole" in data:
         step("konsole", lambda: set_konsole_scheme(None, saved=data["konsole"]))
 
@@ -605,10 +759,25 @@ def cmd_status(_args) -> int:
         "installed": {pal.key: not missing_components(pal) for pal in VARIANTS},
         "missing": {pal.key: missing_components(pal) for pal in VARIANTS},
         "active": {name: read_setting(*spec) for name, spec in SETTINGS.items()},
+        "keyblade": read_setting(KEYBLADE_RC.name, ["Keyblade"], "Current") or None,
+        "keyblade_browser": PLUGIN.is_file(),
         "backup": str(BACKUP) if BACKUP.exists() else None,
     }
     print(json.dumps(report, indent=2))
     return 0
+
+
+def cmd_keyblade(args) -> int:
+    tool = picker.cli(DIST)
+    if not tool.is_file():
+        log.error("install", "keyblade tool not built; run './build.py --only picker'", expected=str(tool))
+        return 2
+    command = [str(tool), "equip", args.name] if args.name else [str(tool), "list"]
+    # Output (the list) goes straight to the terminal.
+    result = subprocess.run(command, timeout=60)
+    if result.returncode != 0:
+        log.error("install", "keyblade tool failed", exit_code=result.returncode, command=command[1])
+    return result.returncode
 
 
 def cmd_sddm(_args) -> int:
@@ -636,12 +805,15 @@ def main() -> int:
     apply_parser.set_defaults(fn=cmd_apply)
     sub.add_parser("revert").set_defaults(fn=cmd_revert)
     sub.add_parser("status").set_defaults(fn=cmd_status)
+    keyblade_parser = sub.add_parser("keyblade")
+    keyblade_parser.add_argument("name", nargs="?", help="keyblade to point with, e.g. oathkeeper; omit to list them")
+    keyblade_parser.set_defaults(fn=cmd_keyblade)
     sub.add_parser("uninstall").set_defaults(fn=cmd_uninstall)
     sub.add_parser("sddm").set_defaults(fn=cmd_sddm)
     args = parser.parse_args()
 
     missing = [tool for tool in REQUIRED_TOOLS if shutil.which(tool) is None]
-    if missing and args.command != "sddm":
+    if missing and args.command not in ("sddm", "keyblade"):
         log.error("install", "required KDE tools are missing", tools=missing)
         return 2
 
