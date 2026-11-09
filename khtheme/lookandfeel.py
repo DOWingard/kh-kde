@@ -15,7 +15,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import kvantum, log, wallpapers
+from . import VERSION, kvantum, log, wallpapers
 from .colorscheme import scheme_id
 from .palette import LOGO_BLUE, Palette, mix
 from .svg import fill_template, write_text
@@ -202,7 +202,7 @@ def _metadata(pal: Palette) -> str:
                 "Id": pal.theme_id,
                 "License": "Fan project; artwork © Disney / Square Enix",
                 "Name": pal.theme_name,
-                "Version": "2.0",
+                "Version": VERSION,
             },
             "X-Plasma-APIVersion": "2",
         },

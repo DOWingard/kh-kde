@@ -1,0 +1,41 @@
+# Maintainer: @MAINTAINER@
+
+pkgname=kingdom-hearts-plasma
+pkgver=@PKGVER@
+pkgrel=@PKGREL@
+pkgdesc='Kingdom Hearts theme for KDE Plasma 6: light and dark global themes, window decorations, Kvantum style, keyblade cursors and picker, icons, sounds, fonts, SDDM'
+arch=('x86_64' 'aarch64')
+url='@URL@'
+license=('LicenseRef-kingdom-hearts-plasma')
+depends=(
+  'aurorae'
+  'gcc-libs'
+  'glibc'
+  'kconfig'
+  'kcoreaddons'
+  'libplasma'
+  'plasma-workspace'
+  'python'
+  'qt6-base'
+  'qt6-tools'
+)
+makedepends=('cmake' 'ffmpeg' 'imagemagick' 'librsvg')
+optdepends=(
+  'kvantum: application style (Breeze in the theme colours without it)'
+  'konsole: terminal colour schemes'
+  'sddm: login screen theme'
+)
+install=kingdom-hearts-plasma.install
+source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
+sha256sums=('@SHA256@')
+
+build() {
+  cd "$pkgname-$pkgver"
+  ./build.py --clean
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  ./install.py stage --destdir "$pkgdir"
+  install -Dm644 ASSETS.md "$pkgdir/usr/share/licenses/$pkgname/ASSETS.md"
+}

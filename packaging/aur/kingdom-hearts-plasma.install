@@ -1,0 +1,18 @@
+post_install() {
+  cat <<'EOF'
+==> The themes are installed. Switch to one, per user, with:
+      kingdom-hearts-plasma apply Sora      (light)
+      kingdom-hearts-plasma apply OrgXIII   (dark)
+    `apply` also sets the sounds, the Kvantum style and the wallpaper, and
+    binds Super + right click on the desktop to the keyblade browser.
+    Before removing this package, run `kingdom-hearts-plasma revert` and
+    `kingdom-hearts-plasma uninstall` to restore your previous look.
+EOF
+}
+
+post_upgrade() {
+  cat <<'EOF'
+==> Run `kingdom-hearts-plasma apply <Sora|OrgXIII>` again to load the
+    upgraded themes and refresh your keyblade cursors.
+EOF
+}

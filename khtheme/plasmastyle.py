@@ -14,7 +14,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
-from . import log
+from . import VERSION, log
 from .colorscheme import render_colors
 from .palette import BLACK, WHITE, Palette
 from .wallpapers import default_for
@@ -238,7 +238,7 @@ def _metadata(pal: Palette) -> str:
                 "Id": pal.theme_id,
                 "License": "CC-BY-SA-4.0",
                 "Name": pal.theme_name,
-                "Version": "1.0",
+                "Version": VERSION,
             },
             "X-Plasma-API": "5.0",
             "X-Plasma-API-Minimum-Version": "6.0",
