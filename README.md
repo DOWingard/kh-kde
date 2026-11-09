@@ -38,8 +38,8 @@ For each variant:
 - **Konsole colour scheme**
 
 Shared by both: a wallpaper package that swaps its picture with the colour
-scheme, a **sound theme** built from menu sound effects, the menu and title
-**fonts**, and an **SDDM login theme**.
+scheme, a **sound theme** in which each event plays the game sound with the
+same meaning, the menu and title **fonts**, and an **SDDM login theme**.
 
 ## Requirements
 
@@ -94,9 +94,30 @@ The picture each variant starts with is the entry marked `default=True` in
 
 ### Sounds
 
-System Settings → Sounds shows the theme as "Kingdom Hearts". Which effect
-plays for which event is the `EVENTS` table in `khtheme/sounds.py`; the mapping
-follows what each effect means in the game (confirm, cancel, error, notice).
+System Settings → Colors & Themes → System Sounds shows the theme as "Kingdom
+Hearts". Every event plays the effect that serves the same purpose in the
+games:
+
+| On the desktop | In the games |
+| --- | --- |
+| A notification or information box | the information pop-up |
+| Changing the volume, cycling completions | the cursor stepping to another entry |
+| Pressing, confirming, a device connecting | confirming an entry |
+| Cancelling, closing, a device leaving | backing out of a menu |
+| A question or password prompt | a menu opening |
+| The system bell, an error | the "not allowed" sound |
+| Battery low | the low-health alarm |
+| Battery full | a gauge reaching its maximum |
+| Saving or burning finished | the game being saved |
+| Timer ran out | a match countdown ending |
+| Logging in / out | starting from the title screen / a computer shutting down |
+| Screenshot or photo | taking a picture |
+| Emptying the trash | a defeated enemy disappearing |
+
+The full list is the `EVENTS` table in `khtheme/sounds.py`. Plasma itself has no
+event for hovering or clicking ordinary menu entries, so the cursor and confirm
+sounds are heard where the desktop does raise an event (volume steps, text
+completion) and in applications that play input-feedback sounds from the theme.
 
 ### Fonts
 

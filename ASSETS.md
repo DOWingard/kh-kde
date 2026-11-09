@@ -33,7 +33,7 @@ Animated sprites from *Kingdom Hearts Melody of Memory*, from the album
 `axel.gif` and `xion.gif` are alternates: set `loading_art` in
 `khtheme/palette.py` to use one.
 
-## `assets/cursor/`, `assets/fonts/` — Kingdom Hearts Re:Collection by Televo
+## `assets/cursor/`, `assets/fonts/`, `assets/sounds/` — Kingdom Hearts Re:Collection by Televo
 
 <https://github.com/Televo/kingdom-hearts-recollection> — "a free archive of art
 assets and custom fonts"; credit is appreciated but not required. These are
@@ -59,10 +59,31 @@ Square Enix trademark whoever hosts it.
 
 ## `assets/sounds/`
 
-Menu sound effects of *Kingdom Hearts Melody of Memory* (`SE_MENU_*`), from the
+Sound effects from the same Televo archive (`Sound Effects/<category>/<name>.wav`),
+stored unmodified; the build trims and levels them. Each file is named for what
+it accompanies in the main games, and the event table in `khtheme/sounds.py`
+relies on those names:
+
+| Category in the archive | Files used |
+| --- | --- |
+| `User Interface` | `Information`, `Menu Move`, `Menu Select`, `Menu Close`, `Menu Open`, `Menu Denied`, `Menu Next`, `Save Game`, `Computer Off`, `Title Screen Start KH3`, `Match Count End`, `Match Win`, `Match Lose` |
+| `Rewards` | `Popup`, `Reward`, `Photo` |
+| `Combat` | `Lock On`, `Lock Off`, `Critical Health`, `Drive Max`, `MP Bubble`, `Enemy Despawn KH2` |
+
+These are game audio, © Disney / Square Enix, whatever the archive's own terms.
+The names were cross-checked against the menu effects of *Kingdom Hearts Melody
+of Memory*, whose file names say what each is for in that game: `Information`,
+`Popup`, `Lock On` and `Lock Off` are sample-identical to `SE_MENU_NOTICE_001`,
+`NOTICE_004`, `COMM_CHECK_ON` and `COMM_CHECK_OFF`, and `Menu Move`, `Menu
+Select`, `Menu Close`, `Menu Open`, `Menu Denied`, `Menu Next` and `Save Game`
+match `COMM_SELECT`, `COMM_ENTER`, `COMM_CANCEL`, `COMM_MENU`, `COMM_NG`,
+`COMM_PAGESLIDE` and `COMM_SAVEEND` with a waveform correlation of 0.998 or
+more. The two labellings agree on every one.
+
+Two effects have no counterpart in the archive and come from the game's own
+files: `SE_MENU_NET_ERROR.wav` and `SE_MENU_NOTICE_003.wav`, from the
 archive.org item `kingdom-hearts-melody-of-memory-sound-effects-and-voices`
-(`Sound Effects.zip`, a rip of the Switch release). Stored unmodified; the
-build trims and levels them. The event mapping is in `khtheme/sounds.py`.
+(`Sound Effects.zip`, a rip of the Switch release).
 
 ## `assets/wallpapers/`
 
