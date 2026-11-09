@@ -8,6 +8,11 @@
     ./install.py keyblade [<name>]  list the pointer keyblades, or point with one
     ./install.py uninstall          remove every installed file (revert first)
     ./install.py sddm               print the root commands that install the login theme
+    ./install.py stage --destdir D  lay the themes out under D/usr for a distribution package
+
+A distribution package installs everything system-wide with `stage` and puts
+this tool on the path as `kingdom-hearts-plasma`; `apply`, `revert`, `status`
+and `keyblade` then work the same, finding the themes under /usr/share.
 
 `apply` saves the previous look (theme ids, accent colour, sound theme,
 wallpaper plugin, lock-screen wallpaper, copies of the touched config files)
@@ -28,7 +33,7 @@ import sys
 import time
 from pathlib import Path
 
-from khtheme import kvantum, log, picker, wallpapers
+from khtheme import VERSION, kvantum, log, picker, wallpapers
 from khtheme.colorscheme import scheme_id
 from khtheme.palette import ORG_XIII, SORA, VARIANTS, Palette
 from khtheme.sounds import THEME_ID as SOUND_THEME
@@ -71,6 +76,28 @@ SWITCH_PAUSE = 2.0
 # Decoration and cursors shown for that moment; both ship with Plasma.
 STANDIN_DECORATION = "org.kde.breeze"
 STANDIN_CURSORS = "breeze_cursors"
+
+# Data folders packages install into, in lookup order (XDG base directories).
+SYSTEM_DATA = [Path(p) for p in (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":") if p]
+# dist subtree -> folder under /usr that a system-wide package installs it to.
+SYSTEM_TREES = {
+    "color-schemes": "share/color-schemes",
+    "plasma/desktoptheme": "share/plasma/desktoptheme",
+    "plasma/look-and-feel": "share/plasma/look-and-feel",
+    "kwin/decorations": "share/kwin/decorations",
+    "icons": "share/icons",
+    "cursors": "share/icons",
+    "wallpapers": "share/wallpapers",
+    "konsole": "share/konsole",
+    "sounds": "share/sounds",
+    "fonts": "share/fonts",
+    "Kvantum": "share/Kvantum",
+    "sddm": "share/sddm/themes",
+}
+SYSTEM_TOOL = "kingdom-hearts-plasma"
+# Written by `stage` next to the copy of this script that a package installs:
+# where that package put the keyblade plugin and command.
+SYSTEM_INSTALL = ROOT / "system-install.json"
 
 # Locations earlier versions installed into; our entries there are removed.
 LEGACY_TREES = [DATA / "aurorae" / "themes"]
@@ -195,9 +222,57 @@ def remove_entry(path: Path) -> None:
 
 
 # --- install / uninstall -----------------------------------------------------
+def search_roots(sub: str) -> list[Path]:
+    """Folders a dist subtree may be installed in: the user's first, then the
+    system-wide ones a package installs to."""
+    if sub == "cursors":
+        return [TREES[sub], DATA / "icons", *(d / "icons" for d in SYSTEM_DATA)]
+    return [TREES[sub], *(d / sub for d in SYSTEM_DATA)]
+
+
+def find_installed(sub: str, *parts: str) -> Path | None:
+    """The copy the desktop will use of an installed file or folder, if any."""
+    for root in search_roots(sub):
+        path = root.joinpath(*parts)
+        if path.exists():
+            return path
+    return None
+
+
+def system_install() -> dict:
+    if not SYSTEM_INSTALL.is_file():
+        return {}
+    try:
+        return json.loads(SYSTEM_INSTALL.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warn("install", "package install record unreadable; the keyblade browser may not be found",
+                 error=exc, path=str(SYSTEM_INSTALL))
+        return {}
+
+
+def installed_plugin() -> Path | None:
+    """The Keyblade Browser plugin the shell loads. A per-user install wins: its
+    folder comes first on QT_PLUGIN_PATH."""
+    if PLUGIN.is_file():
+        return PLUGIN
+    recorded = system_install().get("plugin")
+    if recorded and Path(recorded).is_file():
+        return Path(recorded)
+    return None
+
+
+def keyblade_tool() -> Path | None:
+    built = picker.cli(DIST)
+    if built.is_file():
+        return built
+    recorded = system_install().get("keyblade_tool") or shutil.which("kh-keyblade")
+    return Path(recorded) if recorded and Path(recorded).is_file() else None
+
+
 def cmd_install(_args) -> int:
     if not DIST.is_dir():
-        log.error("install", "nothing to install: run ./build.py first", dist=str(DIST))
+        log.error("install", "nothing to install: run ./build.py first (a system package has installed the themes "
+                  "already; use 'apply')", dist=str(DIST))
         return 2
     copied = 0
     pruned = 0
@@ -443,17 +518,17 @@ def save_backup() -> None:
 
 def missing_components(pal: Palette) -> list[str]:
     expected = {
-        "colour scheme": DATA / "color-schemes" / f"{scheme_id(pal)}.colors",
-        "plasma style": DATA / "plasma" / "desktoptheme" / pal.theme_id / "metadata.json",
-        "global theme": DATA / "plasma" / "look-and-feel" / pal.theme_id / "metadata.json",
-        "window decoration": DATA / "kwin" / "decorations" / pal.decoration_id / "contents" / "ui" / "main.qml",
-        "icons": DATA / "icons" / pal.theme_id / "index.theme",
-        "cursors": TREES["cursors"] / pal.cursor_id / "cursors" / "default",
-        "wallpaper": DATA / "wallpapers" / PREFIX / "metadata.json",
-        "sound theme": DATA / "sounds" / SOUND_THEME / "index.theme",
-        "kvantum style": TREES["Kvantum"] / kvantum.THEME / f"{kvantum.theme_name(pal)}.kvconfig",
+        "colour scheme": ("color-schemes", f"{scheme_id(pal)}.colors"),
+        "plasma style": ("plasma/desktoptheme", pal.theme_id, "metadata.json"),
+        "global theme": ("plasma/look-and-feel", pal.theme_id, "metadata.json"),
+        "window decoration": ("kwin/decorations", pal.decoration_id, "contents", "ui", "main.qml"),
+        "icons": ("icons", pal.theme_id, "index.theme"),
+        "cursors": ("cursors", pal.cursor_id, "cursors", "default"),
+        "wallpaper": ("wallpapers", PREFIX, "metadata.json"),
+        "sound theme": ("sounds", SOUND_THEME, "index.theme"),
+        "kvantum style": ("Kvantum", kvantum.THEME, f"{kvantum.theme_name(pal)}.kvconfig"),
     }
-    return [name for name, path in expected.items() if not path.exists()]
+    return [name for name, (sub, *parts) in expected.items() if find_installed(sub, *parts) is None]
 
 
 def set_konsole_scheme(name: str | None, saved: dict | None = None) -> dict:
@@ -482,14 +557,14 @@ def set_wallpaper(pal: Palette, wallpaper: Path) -> None:
     """
     showing = {desk.get("image", "") for desk in desktops_state()}
     if any(str(wallpaper) in image for image in showing):
-        standin = DATA / "wallpapers" / wallpapers.default_for(pal).package_id
-        if standin.is_dir():
+        standin = find_installed("wallpapers", wallpapers.default_for(pal).package_id)
+        if standin is not None:
             log.info("install", "wallpaper is already selected; switching away and back so the rebuilt picture loads")
             run(["plasma-apply-wallpaperimage", str(standin)], "set stand-in wallpaper", check=False)
             time.sleep(SWITCH_PAUSE)
         else:
             log.warn("install", "no stand-in picture installed; a rebuilt wallpaper may only show after the next login",
-                     expected=str(standin))
+                     expected=wallpapers.default_for(pal).package_id)
     run(["plasma-apply-wallpaperimage", str(wallpaper)], "set wallpaper")
 
 
@@ -506,7 +581,7 @@ def reload_cursors(pal: Palette) -> None:
         time.sleep(SWITCH_PAUSE / 2)
     chosen = run(["plasma-apply-cursortheme", pal.cursor_id], "apply cursor theme", check=False)
     if chosen.returncode != 0 or "not find" in (chosen.stdout + chosen.stderr).lower():
-        log.error("install", "the cursor theme is not selectable; is it installed under ~/.icons?",
+        log.error("install", "the cursor theme is not selectable; is it installed?",
                   cursor=pal.cursor_id, output=(chosen.stdout + chosen.stderr).strip()[-400:])
         raise StepError(f"cursor theme {pal.cursor_id} could not be applied")
     log.info("install", "cursor theme reloaded", cursor=pal.cursor_id)
@@ -603,8 +678,10 @@ def restart_shell() -> None:
 
 def enable_keyblade_browser() -> None:
     """Bind Super + right click on the desktop to the Keyblade Browser."""
-    if not PLUGIN.is_file():
-        log.warn("install", "keyblade browser not installed; Super + right click left as it was", expected=str(PLUGIN))
+    plugin = installed_plugin()
+    if plugin is None:
+        log.warn("install", "keyblade browser not installed; Super + right click left as it was", expected=str(PLUGIN),
+                 package_record=str(SYSTEM_INSTALL))
         return
     write_setting(*SETTINGS["meta_right_window"], PASS_CLICK)
     bound = read_setting(*SETTINGS["meta_right_desktop"]) == picker.PLUGIN_ID
@@ -612,13 +689,14 @@ def enable_keyblade_browser() -> None:
         # The shell only writes this group from its own settings page, so it
         # is safe to change while the shell runs; it is read on restart.
         write_setting(*SETTINGS["meta_right_desktop"], picker.PLUGIN_ID)
-    added = export_plugin_path()
-    outdated = shell_started_before(PLUGIN)
+    # A package puts the plugin in Qt's own folder, which the shell searches anyway.
+    added = export_plugin_path() if plugin == PLUGIN else False
+    outdated = shell_started_before(plugin)
     if not bound or added or outdated:
         log.info("install", "restarting the Plasma shell to load the keyblade browser",
                  newly_bound=not bound, plugin_path_added=added, plugin_updated=outdated)
         restart_shell()
-    log.info("install", "Super + right click on the desktop opens the keyblade browser", plugin=picker.PLUGIN_ID)
+    log.info("install", "Super + right click on the desktop opens the keyblade browser", plugin=str(plugin))
 
 
 def disable_keyblade_browser(saved: dict) -> None:
@@ -657,7 +735,7 @@ def cmd_apply(args) -> int:
 
     # The combined wallpaper package carries a light and a dark image, so the
     # picture follows the colour scheme when Plasma switches day/night themes.
-    wallpaper = DATA / "wallpapers" / PREFIX
+    wallpaper = find_installed("wallpapers", PREFIX)
     set_wallpaper(pal, wallpaper)
 
     lock = ["Greeter", "Wallpaper", "org.kde.image", "General"]
@@ -679,6 +757,11 @@ def cmd_apply(args) -> int:
             BACKUP.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     enable_keyblade_browser()
+    # Puts the chosen keyblade back; with a package install this also makes the
+    # user's copy of the cursors again after a package upgrade.
+    tool = keyblade_tool()
+    if tool is not None:
+        run([str(tool), "restore", "--no-reload"], "restore the chosen keyblade", check=False)
     reload_cursors(pal)
     reload_decoration(pal)
     notify_style_change()
@@ -760,7 +843,8 @@ def cmd_status(_args) -> int:
         "missing": {pal.key: missing_components(pal) for pal in VARIANTS},
         "active": {name: read_setting(*spec) for name, spec in SETTINGS.items()},
         "keyblade": read_setting(KEYBLADE_RC.name, ["Keyblade"], "Current") or None,
-        "keyblade_browser": PLUGIN.is_file(),
+        "keyblade_browser": installed_plugin() is not None,
+        "package": system_install().get("version"),
         "backup": str(BACKUP) if BACKUP.exists() else None,
     }
     print(json.dumps(report, indent=2))
@@ -768,9 +852,9 @@ def cmd_status(_args) -> int:
 
 
 def cmd_keyblade(args) -> int:
-    tool = picker.cli(DIST)
-    if not tool.is_file():
-        log.error("install", "keyblade tool not built; run './build.py --only picker'", expected=str(tool))
+    tool = keyblade_tool()
+    if tool is None:
+        log.error("install", "keyblade tool not built; run './build.py --only picker'", expected=str(picker.cli(DIST)))
         return 2
     command = [str(tool), "equip", args.name] if args.name else [str(tool), "list"]
     # Output (the list) goes straight to the terminal.
@@ -782,6 +866,16 @@ def cmd_keyblade(args) -> int:
 
 def cmd_sddm(_args) -> int:
     source = DIST / "sddm" / PREFIX
+    # SDDM reads themes from its one compiled-in folder, not the XDG ones.
+    packaged = Path("/usr/share/sddm/themes") / PREFIX
+    if not source.is_dir() and packaged.is_dir():
+        print(
+            "# The package installed the login theme; selecting it needs root:\n"
+            "sudo mkdir -p /etc/sddm.conf.d\n"
+            f"printf '[Theme]\\nCurrent={PREFIX}\\n' | sudo tee /etc/sddm.conf.d/10-kingdom-hearts.conf\n"
+            "# undo: sudo rm /etc/sddm.conf.d/10-kingdom-hearts.conf"
+        )
+        return 0
     if not source.is_dir():
         log.error("install", "login theme not built; run './build.py --only sddm'", expected=str(source))
         return 2
@@ -792,6 +886,78 @@ def cmd_sddm(_args) -> int:
         f"printf '[Theme]\\nCurrent={PREFIX}\\n' | sudo tee /etc/sddm.conf.d/10-kingdom-hearts.conf\n"
         "# undo: sudo rm /etc/sddm.conf.d/10-kingdom-hearts.conf"
     )
+    return 0
+
+
+def stage_copy(source: Path, target: Path, mode: int | None = None) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(source, target, symlinks=True)
+    else:
+        shutil.copy2(source, target)
+        if mode is not None:
+            target.chmod(mode)
+
+
+def cmd_stage(args) -> int:
+    """Lay the built themes, the keyblade plugin and command, and this tool out
+    under DESTDIR/usr the way a system-wide package installs them."""
+    if not DIST.is_dir():
+        log.error("stage", "nothing to stage: run ./build.py first", dist=str(DIST))
+        return 2
+    destdir = Path(args.destdir).resolve()
+    usr = destdir / "usr"
+    plugin, tool = picker.plugin_file(DIST), picker.cli(DIST)
+    plugin_dir_record = picker.build_dir(DIST) / "qt-plugin-dir"
+    required = [DIST / sub for sub in SYSTEM_TREES] + [plugin, tool, plugin_dir_record]
+    missing = [str(path) for path in required if not path.exists()]
+    if missing:
+        # A package must be complete; a partial build would ship silently broken.
+        log.error("stage", "build output incomplete; run ./build.py", missing=missing)
+        return 2
+    qt_plugins = Path(plugin_dir_record.read_text(encoding="utf-8").strip())
+    if not qt_plugins.is_absolute():
+        log.error("stage", "the recorded Qt plugin folder is not an absolute path", value=str(qt_plugins),
+                  record=str(plugin_dir_record))
+        return 2
+
+    staged = 0
+    try:
+        for sub, rel in SYSTEM_TREES.items():
+            for entry in sorted((DIST / sub).iterdir()):
+                if not is_ours(entry.name):
+                    log.warn("stage", "unexpected entry in dist, skipped", entry=str(entry))
+                    continue
+                stage_copy(entry, usr / rel / entry.name)
+                staged += 1
+        plugin_target = destdir / qt_plugins.relative_to("/") / picker.NAMESPACE / plugin.name
+        stage_copy(plugin, plugin_target, 0o755)
+        stage_copy(tool, usr / "bin" / tool.name, 0o755)
+
+        share = usr / "share" / SYSTEM_TOOL
+        stage_copy(Path(__file__).resolve(), share / "install.py", 0o755)
+        for module in sorted((ROOT / "khtheme").glob("*.py")):
+            stage_copy(module, share / "khtheme" / module.name, 0o644)
+        record = {
+            "version": VERSION,
+            "plugin": "/" + str(plugin_target.relative_to(destdir)),
+            "keyblade_tool": f"/usr/bin/{tool.name}",
+        }
+        (share / SYSTEM_INSTALL.name).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        launcher = usr / "bin" / SYSTEM_TOOL
+        launcher.write_text(
+            "#!/bin/sh\n# Applies, reverts and reports the Kingdom Hearts themes for the current user.\n"
+            f'exec python3 /usr/share/{SYSTEM_TOOL}/install.py "$@"\n',
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+    except (OSError, ValueError) as exc:
+        log.error("stage", "staging failed", error=exc, destdir=str(destdir))
+        return 1
+    log.info("stage", "system-wide layout staged", destdir=str(destdir), themes=staged, version=VERSION,
+             plugin=record["plugin"])
     return 0
 
 
@@ -810,10 +976,14 @@ def main() -> int:
     keyblade_parser.set_defaults(fn=cmd_keyblade)
     sub.add_parser("uninstall").set_defaults(fn=cmd_uninstall)
     sub.add_parser("sddm").set_defaults(fn=cmd_sddm)
+    stage_parser = sub.add_parser("stage")
+    stage_parser.add_argument("--destdir", required=True, help="root to lay /usr out under (a package's staging folder)")
+    stage_parser.set_defaults(fn=cmd_stage)
     args = parser.parse_args()
 
     missing = [tool for tool in REQUIRED_TOOLS if shutil.which(tool) is None]
-    if missing and args.command not in ("sddm", "keyblade"):
+    # Staging runs in a package build, where the desktop's tools need not exist.
+    if missing and args.command not in ("sddm", "keyblade", "stage"):
         log.error("install", "required KDE tools are missing", tools=missing)
         return 2
 
