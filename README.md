@@ -60,7 +60,40 @@ same meaning, the menu and title **fonts**, and an **SDDM login theme**.
   On Arch Linux these come with the regular packages
 - PyQt6, only for `tools/preview.py`
 
-## Quick start
+## Installing from the AUR
+
+On Arch Linux the package builds everything on your machine and installs it
+system-wide: the themes under `/usr/share`, the keyblade menu in Qt's plugin
+folder.
+
+```sh
+yay -S kingdom-hearts-plasma
+kingdom-hearts-plasma apply Sora      # or OrgXIII; each user runs this
+```
+
+`kingdom-hearts-plasma` takes the same commands as `./install.py` below
+(`apply`, `revert`, `status`, `keyblade`, `sddm`, `uninstall`); there is
+nothing to `install`. The system copies of the cursor themes are read-only, so
+the first time you choose a keyblade they are copied to `~/.icons` and the copy
+is changed; after a package upgrade the next `apply` or keyblade choice makes
+the copy again. Before removing the package, run `kingdom-hearts-plasma revert`
+and then `kingdom-hearts-plasma uninstall`, which deletes those copies.
+
+### After Plasma updates
+
+The keyblade menu is the one compiled part. It uses only public Qt, KDE
+Frameworks and libplasma API, so a build keeps working across Qt and Frameworks
+updates, whose libraries stay `.so.6` for all of 6.x. libplasma is the
+exception: it raises its library version when its ABI changes, and a build made
+before that cannot load. The rest of the theme is unaffected, and `apply` and
+`status` report it with the command that fixes it: `yay -S --rebuild
+kingdom-hearts-plasma`, or from source `./build.py --only picker && ./install.py
+install`. `checkrebuild` (package `rebuild-detector`) lists it as well.
+
+## Installing from source
+
+Take the source bundle (`kingdom-hearts-plasma-<version>.tar.gz`) from the
+project's releases page, or clone the repository, then:
 
 ```sh
 ./build.py                    # generate everything into dist/
@@ -178,7 +211,8 @@ under Desktop and Wallpaper → Mouse Actions (right-click the desktop →
 Desktop and Wallpaper). The menu plugin is loaded by the Plasma shell from
 `~/.local/share/kingdom-hearts-plasma/plugins`, which a login script in
 `~/.config/plasma-workspace/env/` puts on `QT_PLUGIN_PATH`; `apply` restarts
-the shell once so the running session finds it.
+the shell once so the running session finds it. The AUR package puts the plugin
+in Qt's own plugin folder instead, where the shell finds it without the script.
 
 ### Fonts
 
@@ -194,6 +228,9 @@ commands with:
 ```sh
 ./install.py sddm
 ```
+
+The AUR package installs the theme into `/usr/share/sddm/themes` already, and
+`kingdom-hearts-plasma sddm` prints only the command that selects it.
 
 The variant is chosen in `theme.conf` inside the installed theme
 (`variant=OrgXIII` or `variant=Sora`). The login screen is fitted to each
@@ -278,11 +315,29 @@ buttons; neither may be drawn on its single desktop, and "on all desktops" has
 to appear once a second desktop is added. It needs `kwin_wayland`,
 `dbus-run-session`, `qdbus6` and `spectacle`.
 
+## Releasing
+
+The version is `VERSION` in `khtheme/__init__.py`. With the change committed
+and the GitHub repository as the `origin` remote:
+
+```sh
+./tools/release.py --test-build
+```
+
+This writes the source bundle (`git archive` of HEAD) and its checksum to
+`dist/release/`, fills in `packaging/aur/PKGBUILD.in` into
+`dist/release/aur/` together with `.SRCINFO`, builds the package with `makepkg`
+from the local bundle to prove the PKGBUILD works, and prints the commands that
+publish the release. It runs none of them. The PKGBUILD downloads the bundle
+from the GitHub release tagged `v<version>`, so attach the bundle to that
+release before pushing the AUR files. For a packaging-only fix, run it with
+`--pkgrel 2` (and so on) at the same version.
+
 ## Layout
 
 ```
 build.py              build entry point
-install.py            install / apply / revert / uninstall / status / sddm
+install.py            install / apply / revert / uninstall / status / sddm / stage
 ASSETS.md             where every piece of third-party art comes from
 assets/               reference art, sprites, fonts, logo, sounds, wallpapers
 khtheme/
@@ -304,7 +359,9 @@ khtheme/
   sddm.py             login theme
   log.py              structured logging
 picker/               keyblade menu: Plasma mouse-action plugin, kh-keyblade, preview host
+packaging/aur/        PKGBUILD template and install messages for the AUR package
 tools/
+  release.py          source bundle and AUR package files for a release
   preview.py          offscreen renders of the built theme
   cursorsheet.py      contact sheet of a built cursor theme
   widgetgallery.py    widgets in one colour scheme and style
