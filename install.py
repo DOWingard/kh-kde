@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from khtheme import log
+from khtheme import log, wallpapers
 from khtheme.colorscheme import scheme_id
 from khtheme.palette import ORG_XIII, SORA, VARIANTS, Palette
 from khtheme.sounds import THEME_ID as SOUND_THEME
@@ -58,6 +58,12 @@ TREES = {
     "sounds": DATA / "sounds",
     "fonts": DATA / "fonts",
 }
+# Seconds given to KWin or the shell to let go of what it showed before, when
+# something is switched away and back to make a rebuilt version load.
+SWITCH_PAUSE = 2.0
+# Decoration shown for that moment; it ships with Plasma.
+STANDIN_DECORATION = "org.kde.breeze"
+
 # Locations earlier versions installed into; our entries there are removed.
 LEGACY_TREES = [DATA / "aurorae" / "themes"]
 
@@ -387,6 +393,48 @@ def set_konsole_scheme(name: str | None, saved: dict | None = None) -> dict:
     return previous
 
 
+def set_wallpaper(pal: Palette, wallpaper: Path) -> None:
+    """Show the combined wallpaper package, also when it is already selected.
+
+    The shell keeps a picture it is showing in memory under its path, so a
+    rebuilt picture at the same path would not appear. In that case another
+    picture is shown for a moment first, which makes the shell drop the old one.
+    """
+    showing = {desk.get("image", "") for desk in desktops_state()}
+    if any(str(wallpaper) in image for image in showing):
+        standin = DATA / "wallpapers" / wallpapers.default_for(pal).package_id
+        if standin.is_dir():
+            log.info("install", "wallpaper is already selected; switching away and back so the rebuilt picture loads")
+            run(["plasma-apply-wallpaperimage", str(standin)], "set stand-in wallpaper", check=False)
+            time.sleep(SWITCH_PAUSE)
+        else:
+            log.warn("install", "no stand-in picture installed; a rebuilt wallpaper may only show after the next login",
+                     expected=str(standin))
+    run(["plasma-apply-wallpaperimage", str(wallpaper)], "set wallpaper")
+
+
+def reload_decoration(pal: Palette) -> None:
+    """Make the running window manager load the decoration's files afresh.
+
+    KWin keeps a loaded decoration for as long as any window uses it, so a plain
+    reconfigure leaves a reinstalled decoration unseen until the next login.
+    Switching to another decoration and back releases it; windows show the
+    stand-in frame for a moment. The setting is restored even if a step fails.
+    """
+    library = SETTINGS["decoration_library"]
+    try:
+        write_setting(*library, STANDIN_DECORATION)
+        run(["qdbus6", "org.kde.KWin", "/KWin", "reconfigure"], "switch to stand-in decoration", check=False)
+        time.sleep(SWITCH_PAUSE)
+    except StepError as exc:
+        log.warn("install", "could not switch decorations; a reinstalled decoration may only load after the next login", error=exc)
+    finally:
+        write_setting(*library, "org.kde.kwin.aurorae")
+        write_setting(*SETTINGS["decoration_theme"], pal.decoration_id)
+        run(["qdbus6", "org.kde.KWin", "/KWin", "reconfigure"], "reload window manager", check=False)
+    log.info("install", "window decoration reloaded", decoration=pal.decoration_id)
+
+
 def cmd_apply(args) -> int:
     pal = variant(args.variant)
     missing = missing_components(pal)
@@ -408,7 +456,7 @@ def cmd_apply(args) -> int:
     # The combined wallpaper package carries a light and a dark image, so the
     # picture follows the colour scheme when Plasma switches day/night themes.
     wallpaper = DATA / "wallpapers" / PREFIX
-    run(["plasma-apply-wallpaperimage", str(wallpaper)], "set wallpaper")
+    set_wallpaper(pal, wallpaper)
 
     lock = ["Greeter", "Wallpaper", "org.kde.image", "General"]
     write_setting("kscreenlockerrc", ["Greeter"], "WallpaperPlugin", "org.kde.image")
@@ -428,7 +476,7 @@ def cmd_apply(args) -> int:
             data.setdefault("konsole", previous)
             BACKUP.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
-    run(["qdbus6", "org.kde.KWin", "/KWin", "reconfigure"], "reload window manager", check=False)
+    reload_decoration(pal)
     log.info("install", "variant applied", variant=pal.key, theme=pal.theme_id)
     return 0
 
