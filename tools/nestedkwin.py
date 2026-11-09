@@ -11,12 +11,19 @@ installed themes are touched. Two test windows are opened in it and its
 
 Unlike tools/preview.py, which draws the decoration against stand-ins, this
 exercises KWin's own decoration engine, so it catches API mistakes.
+
+It also checks where the frame would resize: each test window reports the
+title-bar rectangle KWin holds for it, and every point of the top bar outside
+the thin strip along the window edge has to count as title bar. A title bar
+that KWin places wrongly makes the whole bar, buttons included, show the
+resize cursor.
 Requires kwin_wayland, dbus-run-session, spectacle and PyQt6.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import struct
@@ -28,7 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from khtheme import log  # noqa: E402
+from khtheme import decoration, log  # noqa: E402
 from khtheme.palette import VARIANTS, Palette  # noqa: E402
 
 DIST = ROOT / "dist"
@@ -42,16 +49,40 @@ from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 app = QApplication(sys.argv)
 windows = []
-for title in ("Dive to the Heart", "Journal"):
+# The maximised window goes first so the two floating ones stay visible above it.
+for title, maximised in (("World Map", True), ("Dive to the Heart", False), ("Journal", False)):
     window = QWidget()
     window.setWindowTitle(title)
     QVBoxLayout(window).addWidget(QLabel(title))
     window.resize(500, 260)
-    window.show()
+    if maximised:
+        window.showMaximized()
+    else:
+        window.show()
     windows.append(window)
 QTimer.singleShot(9000, app.quit)
 app.exec()
 """
+WINDOWS = 3
+
+# Appended to the copy of the decoration under test (never to the built one):
+# reports the geometry KWin ended up with, once the window has settled.
+PROBE_TAG = "KHPROBE "
+PROBE = """
+    Timer {
+        interval: 2500
+        running: true
+        onTriggered: console.warn("%s" + JSON.stringify({
+            "caption": decoration.client.caption,
+            "maximized": decoration.client.maximized,
+            "clientWidth": decoration.client.width,
+            "titleBar": [decoration.titleBar.x, decoration.titleBar.y, decoration.titleBar.width, decoration.titleBar.height],
+            "borders": [decoration.borderLeft, decoration.borderTop, decoration.borderRight, decoration.borderBottom],
+            "grips": [decoration.resizeOnlyBorderLeft, decoration.resizeOnlyBorderTop,
+                      decoration.resizeOnlyBorderRight, decoration.resizeOnlyBorderBottom]
+        }))
+    }
+""" % PROBE_TAG
 
 SESSION = """#!/bin/sh
 export QT_QPA_PLATFORM=wayland
@@ -70,6 +101,73 @@ def png_size(path: Path) -> tuple[int, int]:
     return struct.unpack(">II", head[16:24])
 
 
+def add_probe(main_qml: Path) -> None:
+    text = main_qml.read_text(encoding="utf-8").rstrip()
+    if not text.endswith("}"):
+        raise ValueError(f"{main_qml.name} does not end with the root item's closing brace")
+    main_qml.write_text(text[:-1] + PROBE + "}\n", encoding="utf-8")
+
+
+def read_probes(stderr: str) -> list[dict]:
+    probes = []
+    for line in stderr.splitlines():
+        if PROBE_TAG not in line:
+            continue
+        try:
+            probes.append(json.loads(line.split(PROBE_TAG, 1)[1]))
+        except json.JSONDecodeError as exc:
+            log.warn("nestedkwin", "unreadable probe line; ignored", error=exc, line=line[:300])
+    return probes
+
+
+def resizing_share(probe: dict) -> tuple[float, list[tuple[int, int]]]:
+    """Share of the top bar that would resize, and the offending points.
+
+    Follows KDecoration's rule for the section under the pointer: a point of the
+    top border is title bar when the title-bar rectangle contains it, or when it
+    lies beside the side borders and not above the rectangle's top; anything
+    else there resizes. Points in the edge strip the decoration reserves on
+    purpose are not offences.
+    """
+    left, top, right, _bottom = (int(v) for v in probe["borders"])
+    width = int(probe["clientWidth"]) + left + right
+    tx, ty, tw, th = (int(round(v)) for v in probe["titleBar"])
+    grip = 0 if probe["maximized"] else decoration.TOP_GRIP
+    side = 0 if probe["maximized"] else decoration.LINE
+    resizing = 0
+    offences: list[tuple[int, int]] = []
+    for y in range(top):
+        for x in range(width):
+            in_title = tx <= x < tx + tw and ty <= y < ty + th
+            is_title = in_title or (left <= x < width - right and y >= ty)
+            if is_title:
+                continue
+            resizing += 1
+            if y >= grip and side <= x < width - side:
+                offences.append((x, y))
+    return resizing / max(1, top * width), offences
+
+
+def check_sections(pal: Palette, probes: list[dict]) -> bool:
+    if len(probes) != WINDOWS:
+        log.error("nestedkwin", "not every test window reported its title bar", variant=pal.key,
+                  expected=WINDOWS, reported=len(probes))
+        return False
+    ok = True
+    for probe in probes:
+        share, offences = resizing_share(probe)
+        fields = dict(variant=pal.key, window=probe["caption"], maximized=probe["maximized"],
+                      title_bar=probe["titleBar"], borders=probe["borders"], resize_margins=probe["grips"],
+                      top_bar_resizing_percent=round(100 * share, 1))
+        if offences:
+            ok = False
+            log.error("nestedkwin", "the top bar resizes away from the window edge", **fields,
+                      points=len(offences), first=offences[0], last=offences[-1])
+        else:
+            log.info("nestedkwin", "the top bar resizes only along the window edge", **fields)
+    return ok
+
+
 def check(pal: Palette) -> bool:
     package = DIST / "kwin" / "decorations" / pal.decoration_id
     if not package.is_dir():
@@ -78,7 +176,13 @@ def check(pal: Palette) -> bool:
     with tempfile.TemporaryDirectory(prefix="khkwin-") as tmp_name:
         work = Path(tmp_name)
         (work / "config").mkdir()
-        shutil.copytree(package, work / "data" / "kwin" / "decorations" / pal.decoration_id)
+        under_test = work / "data" / "kwin" / "decorations" / pal.decoration_id
+        shutil.copytree(package, under_test)
+        try:
+            add_probe(under_test / "contents" / "ui" / "main.qml")
+        except (OSError, ValueError) as exc:
+            log.error("nestedkwin", "could not add the geometry probe", error=exc, variant=pal.key)
+            return False
         (work / "config" / "kwinrc").write_text(
             f"[org.kde.kdecoration2]\nlibrary=org.kde.kwin.aurorae\ntheme={pal.decoration_id}\n", encoding="utf-8"
         )
@@ -95,6 +199,9 @@ def check(pal: Palette) -> bool:
             XDG_CACHE_HOME=str(work / "cache"),
             # Lets the screenshot tool of this private session capture its screen.
             KWIN_WAYLAND_NO_PERMISSION_CHECKS="1",
+            # Without a terminal Qt would send KWin's messages to the system
+            # journal, and QML errors in the decoration would go unseen here.
+            QT_FORCE_STDERR_LOGGING="1",
         )
         cmd = [
             "dbus-run-session", "--", "kwin_wayland", "--virtual", "--width", str(SIZE[0]), "--height", str(SIZE[1]),
@@ -107,7 +214,9 @@ def check(pal: Palette) -> bool:
             except subprocess.TimeoutExpired as exc:
                 log.error("nestedkwin", "nested window manager did not exit", error=exc, variant=pal.key)
                 return False
-        notes = [ln for ln in result.stderr.splitlines() if ".qml" in ln or "aurorae" in ln.lower()]
+        notes = [ln for ln in result.stderr.splitlines()
+                 if PROBE_TAG not in ln and (".qml" in ln or "aurorae" in ln.lower())]
+        sections_ok = check_sections(pal, read_probes(result.stderr))
         if notes:
             log.warn("nestedkwin", "the decoration engine reported problems", variant=pal.key, lines=notes[:12])
         shot = work / "shot.png"
@@ -128,7 +237,7 @@ def check(pal: Palette) -> bool:
         target = OUT / f"kwin-{pal.key}.png"
         shutil.copyfile(shot, target)
         log.info("nestedkwin", "decoration rendered by KWin", variant=pal.key, target=str(target), engine_notes=len(notes))
-    return not notes
+    return not notes and sections_ok
 
 
 def main() -> int:

@@ -38,7 +38,8 @@ BUTTON = 22
 EMBLEM = 26  # the window-menu emblem; larger than a button so its detail survives
 TAB_H = 24
 TAB_CAP = 14
-GRIP = 6  # invisible resize margin outside the frame
+GRIP = 6  # invisible resize margin outside the frame (sides and bottom; KWin gives the top none)
+TOP_GRIP = 3  # rows along the top edge, inside the frame, that resize; ends where the buttons start
 
 SCALES = (1, 2)
 
@@ -389,8 +390,23 @@ Decoration {
                 }
             }
         }
+    }
 
-        Component.onCompleted: decoration.installTitleItem(bar)
+    // What KWin treats as the title bar: dragging here moves the window and the
+    // pointer stays an arrow; the rows of the top border above it resize.
+    // KWin takes this item's place in the scene as a position inside the window
+    // frame, and the frame starts at the scene's origin once the shadow margin
+    // is left out. So unlike the visible bar it must not be offset by the
+    // margin, or nearly the whole bar, buttons included, turns into a resize
+    // handle. It has no children on purpose: with children KWin would use
+    // their bounding box instead of the item.
+    Item {
+        id: titleArea
+        x: root.maxed ? 0 : root.line
+        y: root.maxed ? 0 : @@TOP_GRIP@@
+        width: (root.maxed ? root.width : root.width - 2 * root.pad) - 2 * x
+        height: (root.maxed ? root.maximizedTitleHeight : root.titleHeight) - y
+        Component.onCompleted: decoration.installTitleItem(titleArea)
     }
 
     Component { id: menuComponent; KhMenuButton {} }
@@ -513,6 +529,7 @@ def _values(pal: Palette) -> dict[str, object]:
         "BUTTON": BUTTON,
         "EMBLEM": EMBLEM,
         "GRIP": GRIP,
+        "TOP_GRIP": TOP_GRIP,
         "FONT": FONT,
         "SLICE_X": PAD + CAP,
         "SLICE_TOP": PAD + TITLE,
