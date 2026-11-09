@@ -44,7 +44,7 @@ def read_xcursor(path: Path) -> list[tuple[int, int, int, int, int, int, bytes]]
 
 
 def render(dist: Path, pal: Palette, target: Path, nominal: int = 48) -> bool:
-    cursors = dist / "icons" / pal.cursor_id / "cursors"
+    cursors = dist / "cursors" / pal.cursor_id / "cursors"
     if not cursors.is_dir():
         log.error("cursorsheet", "cursor theme is not built", path=str(cursors))
         return False

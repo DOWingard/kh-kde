@@ -53,6 +53,10 @@ TREES = {
     "plasma/look-and-feel": DATA / "plasma" / "look-and-feel",
     "kwin/decorations": DATA / "kwin" / "decorations",
     "icons": DATA / "icons",
+    # Not DATA/icons: the cursor chooser in System Settings lists only ~/.icons
+    # and the system directories, and installs downloaded cursor themes to
+    # ~/.icons itself. KWin and the toolkits all search ~/.icons as well.
+    "cursors": HOME / ".icons",
     "wallpapers": DATA / "wallpapers",
     "konsole": DATA / "konsole",
     "sounds": DATA / "sounds",
@@ -61,8 +65,9 @@ TREES = {
 # Seconds given to KWin or the shell to let go of what it showed before, when
 # something is switched away and back to make a rebuilt version load.
 SWITCH_PAUSE = 2.0
-# Decoration shown for that moment; it ships with Plasma.
+# Decoration and cursors shown for that moment; both ship with Plasma.
 STANDIN_DECORATION = "org.kde.breeze"
+STANDIN_CURSORS = "breeze_cursors"
 
 # Locations earlier versions installed into; our entries there are removed.
 LEGACY_TREES = [DATA / "aurorae" / "themes"]
@@ -369,7 +374,7 @@ def missing_components(pal: Palette) -> list[str]:
         "global theme": DATA / "plasma" / "look-and-feel" / pal.theme_id / "metadata.json",
         "window decoration": DATA / "kwin" / "decorations" / pal.decoration_id / "contents" / "ui" / "main.qml",
         "icons": DATA / "icons" / pal.theme_id / "index.theme",
-        "cursors": DATA / "icons" / pal.cursor_id / "cursors" / "default",
+        "cursors": TREES["cursors"] / pal.cursor_id / "cursors" / "default",
         "wallpaper": DATA / "wallpapers" / PREFIX / "metadata.json",
         "sound theme": DATA / "sounds" / SOUND_THEME / "index.theme",
     }
@@ -411,6 +416,25 @@ def set_wallpaper(pal: Palette, wallpaper: Path) -> None:
             log.warn("install", "no stand-in picture installed; a rebuilt wallpaper may only show after the next login",
                      expected=str(standin))
     run(["plasma-apply-wallpaperimage", str(wallpaper)], "set wallpaper")
+
+
+def reload_cursors(pal: Palette) -> None:
+    """Make the window manager read the cursor theme's files afresh.
+
+    KWin remembers where each cursor shape's file is and loads shapes on first
+    use, so a reinstalled or moved theme of the same name would leave it with
+    stale shapes or missing files. Selecting another theme and coming back
+    makes it look again. Also proves the theme is one the chooser can select.
+    """
+    standin = run(["plasma-apply-cursortheme", STANDIN_CURSORS], "switch to stand-in cursors", check=False)
+    if standin.returncode == 0:
+        time.sleep(SWITCH_PAUSE / 2)
+    chosen = run(["plasma-apply-cursortheme", pal.cursor_id], "apply cursor theme", check=False)
+    if chosen.returncode != 0 or "not find" in (chosen.stdout + chosen.stderr).lower():
+        log.error("install", "the cursor theme is not selectable; is it installed under ~/.icons?",
+                  cursor=pal.cursor_id, output=(chosen.stdout + chosen.stderr).strip()[-400:])
+        raise StepError(f"cursor theme {pal.cursor_id} could not be applied")
+    log.info("install", "cursor theme reloaded", cursor=pal.cursor_id)
 
 
 def reload_decoration(pal: Palette) -> None:
@@ -476,6 +500,7 @@ def cmd_apply(args) -> int:
             data.setdefault("konsole", previous)
             BACKUP.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
+    reload_cursors(pal)
     reload_decoration(pal)
     log.info("install", "variant applied", variant=pal.key, theme=pal.theme_id)
     return 0

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import os
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -419,9 +420,15 @@ Inherits=breeze_cursors
 
 
 def build(out: Path, pal: Palette) -> Path:
-    root = out / "icons" / pal.cursor_id
+    # Cursor themes get a tree of their own: they are installed to a different
+    # place than icon themes, although both are "icon themes" on disk.
+    root = out / "cursors" / pal.cursor_id
     target = root / "cursors"
     with log.timed("cursors", "build cursor theme", variant=pal.key, target=str(target)):
+        legacy = out / "icons" / pal.cursor_id
+        if legacy.is_dir():
+            shutil.rmtree(legacy)
+            log.info("cursors", "removed a cursor theme from an older layout", path=str(legacy))
         names = set(RASTER_CURSORS) | set(_vector_cursors())
         missing = set(ALIASES) - names
         if missing:
