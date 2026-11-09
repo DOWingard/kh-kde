@@ -1,0 +1,161 @@
+#!/usr/bin/env python3
+"""Render the built theme pieces to PNGs without touching the live desktop.
+
+The Plasma Style is drawn through KSvg (the library Plasma itself uses), so
+slice bounds, margins and shadows are checked exactly as the shell would see
+them. The window decoration, splash and login screens are loaded as QML against
+stand-ins for the objects KWin and SDDM provide. Cursors are read back from the
+packed cursor files; widgets are drawn by the Breeze style in each colour scheme.
+
+    ./tools/preview.py                 # everything, both variants
+    ./tools/preview.py --only splash   # plasmastyle | decoration | splash | sddm | cursors | widgets
+
+Images land in CONTEXT/tmp/previews/. Requires PyQt6 and a prior ./build.py.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import cursorsheet  # noqa: E402
+from khtheme import log, wallpapers  # noqa: E402
+from khtheme.colorscheme import scheme_id  # noqa: E402
+from khtheme.palette import VARIANTS, Palette  # noqa: E402
+
+SCENES = Path(__file__).resolve().parent / "preview"
+DIST = ROOT / "dist"
+OUT = ROOT / "CONTEXT" / "tmp" / "previews"
+
+
+def scene_props(scene: str, pal: Palette) -> dict:
+    from PyQt6.QtCore import QUrl
+
+    if scene == "plasmastyle":
+        return {
+            "base": str(DIST / "plasma" / "desktoptheme" / pal.theme_id),
+            "dark": pal.dark,
+            "textColor": pal.text,
+            "wallpaper": QUrl.fromLocalFile(str(wallpapers.default_image(DIST, pal))),
+        }
+    if scene == "decoration":
+        main = DIST / "kwin" / "decorations" / pal.decoration_id / "contents" / "ui" / "main.qml"
+        return {
+            "theme": QUrl.fromLocalFile(str(main)),
+            "wallpaper": QUrl.fromLocalFile(str(wallpapers.default_image(DIST, pal))),
+            "bodyColor": pal.window,
+            "bodyText": pal.text,
+        }
+    if scene == "splash":
+        splash = DIST / "plasma" / "look-and-feel" / pal.theme_id / "contents" / "splash" / "Splash.qml"
+        return {"splash": splash.as_uri()}
+    if scene == "sddm":
+        return {"main": (DIST / "sddm" / "KingdomHearts" / "Main.qml").as_uri(), "variantName": pal.key, "fail": False}
+    raise KeyError(scene)
+
+
+SETTLE_MS = {"plasmastyle": 900, "decoration": 900, "splash": 2600, "sddm": 1600}
+
+
+def render_cursors(pal: Palette) -> bool:
+    return cursorsheet.render(DIST, pal, OUT / f"cursors-{pal.key}.png", nominal=32)
+
+
+def render_widgets(pal: Palette) -> bool:
+    scheme = DIST / "color-schemes" / f"{scheme_id(pal)}.colors"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve().parent / "widgetgallery.py"), str(scheme),
+             str(OUT / f"widgets-{pal.key}.png")],
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        log.error("preview", "widget gallery timed out", error=exc, variant=pal.key)
+        return False
+    return result.returncode == 0
+
+
+# Scenes that are not QML: name -> renderer(pal) -> success.
+STATIC = {"cursors": render_cursors, "widgets": render_widgets}
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--only", nargs="+", choices=sorted([*SETTLE_MS, *STATIC]), help="render only these scenes")
+    args = parser.parse_args()
+    scenes = args.only or [*SETTLE_MS, *STATIC]
+
+    if not DIST.is_dir():
+        log.error("preview", "dist/ not found; run ./build.py first", dist=str(DIST))
+        return 2
+    # Render into memory instead of opening windows on the desktop.
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    try:
+        from PyQt6.QtCore import QTimer, QUrl
+        from PyQt6.QtGui import QGuiApplication
+        from PyQt6.QtQuick import QQuickView
+    except ImportError as exc:
+        log.error("preview", "PyQt6 is required for previews", error=exc)
+        return 2
+
+    OUT.mkdir(parents=True, exist_ok=True)
+    failures: list[str] = []
+    for scene in scenes:
+        if scene in STATIC:
+            for pal in VARIANTS:
+                if not STATIC[scene](pal):
+                    failures.append(f"{scene}-{pal.key}")
+    jobs = [(scene, pal) for scene in scenes if scene in SETTLE_MS for pal in VARIANTS]
+    app = QGuiApplication(sys.argv[:1])
+    views = []  # keep views alive until the event loop ends
+
+    def run_next() -> None:
+        if not jobs:
+            app.quit()
+            return
+        scene, pal = jobs.pop(0)
+        name = f"{scene}-{pal.key}"
+        view = QQuickView()
+        views.append(view)
+        # Stand-ins for the QML modules that only exist inside KWin.
+        view.engine().addImportPath(str(SCENES / "mock"))
+        view.setInitialProperties(scene_props(scene, pal))
+        view.setSource(QUrl.fromLocalFile(str(SCENES / f"{scene}.qml")))
+        if view.status() != QQuickView.Status.Ready:
+            failures.append(name)
+            log.error("preview", "scene failed to load", scene=name, errors=[e.toString() for e in view.errors()])
+            QTimer.singleShot(0, run_next)
+            return
+        view.show()
+
+        def grab() -> None:
+            target = OUT / f"{name}.png"
+            image = view.grabWindow()
+            if image.isNull() or not image.save(str(target)):
+                failures.append(name)
+                log.error("preview", "could not save render", scene=name, target=str(target))
+            else:
+                log.info("preview", "rendered", scene=name, target=str(target), size=f"{image.width()}x{image.height()}")
+            view.close()
+            run_next()
+
+        QTimer.singleShot(SETTLE_MS[scene], grab)
+
+    QTimer.singleShot(0, run_next)
+    app.exec()
+    if failures:
+        log.error("preview", "some previews failed", failed=failures)
+        return 1
+    log.info("preview", "previews written", directory=str(OUT))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
