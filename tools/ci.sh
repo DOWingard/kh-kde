@@ -84,11 +84,14 @@ as_root() {
     useradd --create-home "$BUILDER"
     log info "unprivileged user created" user="$BUILDER"
   fi
+  # Read while root still owns the checkout; git refuses it to root afterwards.
+  local commit
+  commit=$(git -C "$ROOT" rev-parse --short HEAD)
   chown -R "$BUILDER:" "$ROOT"
   runuser -u "$BUILDER" -- bash "$ROOT/tools/ci.sh" --build
   step "install the package" install_package
   runuser -u "$BUILDER" -- bash "$ROOT/tools/ci.sh" --installed
-  log info "all checks passed" commit="$(git -C "$ROOT" rev-parse --short HEAD)"
+  log info "all checks passed" commit="$commit"
 }
 
 release_args() {
