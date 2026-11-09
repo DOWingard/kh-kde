@@ -156,6 +156,26 @@ def build_gallery(widgets):
     return window, menu, (keys, table)
 
 
+def styled_environment(config: Path, scheme: Path, style: str, kvantum_theme: Path | None) -> dict[str, str]:
+    """Fill `config` as a configuration folder holding only the colour scheme,
+    the widget style and (optionally) a Kvantum theme, and return the
+    environment that makes a Qt program draw off screen with them."""
+    (config / "kdeglobals").write_text(
+        scheme.read_text(encoding="utf-8") + f"\n[KDE]\nwidgetStyle={style}\n", encoding="utf-8"
+    )
+    if kvantum_theme:
+        shutil.copytree(kvantum_theme, config / "Kvantum" / kvantum_theme.name)
+        (config / "Kvantum" / "kvantum.kvconfig").write_text(f"[General]\ntheme={kvantum_theme.name}\n", encoding="utf-8")
+    return {
+        "XDG_CONFIG_HOME": str(config),
+        "QT_QPA_PLATFORM": "offscreen",
+        # The offscreen platform loads no desktop integration by itself; without
+        # Plasma's platform theme Qt falls back to Fusion and ignores the scheme.
+        "QT_QPA_PLATFORMTHEME": "kde",
+        "QT_STYLE_OVERRIDE": style,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("scheme", type=Path)
@@ -171,21 +191,7 @@ def main() -> int:
         return 2
 
     with tempfile.TemporaryDirectory(prefix="khgallery-") as config:
-        Path(config, "kdeglobals").write_text(
-            args.scheme.read_text(encoding="utf-8") + f"\n[KDE]\nwidgetStyle={args.style}\n", encoding="utf-8"
-        )
-        if args.kvantum:
-            target = Path(config, "Kvantum", args.kvantum.name)
-            shutil.copytree(args.kvantum, target)
-            Path(config, "Kvantum", "kvantum.kvconfig").write_text(
-                f"[General]\ntheme={args.kvantum.name}\n", encoding="utf-8"
-            )
-        os.environ["XDG_CONFIG_HOME"] = config
-        os.environ["QT_QPA_PLATFORM"] = "offscreen"
-        # The offscreen platform loads no desktop integration by itself; without
-        # Plasma's platform theme Qt falls back to Fusion and ignores the scheme.
-        os.environ["QT_QPA_PLATFORMTHEME"] = "kde"
-        os.environ["QT_STYLE_OVERRIDE"] = args.style
+        os.environ.update(styled_environment(Path(config), args.scheme, args.style, args.kvantum))
         try:
             from PyQt6 import QtWidgets
             from PyQt6.QtCore import QPoint, QTimer

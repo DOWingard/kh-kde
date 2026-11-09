@@ -6,9 +6,10 @@ slice bounds, margins and shadows are checked exactly as the shell would see
 them. The window decoration, splash and login screens are loaded as QML against
 stand-ins for the objects KWin and SDDM provide. Cursors are read back from the
 packed cursor files; widgets are drawn by the real Kvantum engine with the built theme.
+The keyblade menu is the built plugin, loaded by id the way the Plasma shell loads it.
 
     ./tools/preview.py                 # everything, both variants
-    ./tools/preview.py --only splash   # plasmastyle | decoration | splash | sddm | cursors | widgets
+    ./tools/preview.py --only splash   # plasmastyle | decoration | splash | sddm | cursors | widgets | keyblades
 
 Images land in CONTEXT/tmp/previews/. Requires PyQt6 and a prior ./build.py.
 """
@@ -16,6 +17,7 @@ Images land in CONTEXT/tmp/previews/. Requires PyQt6 and a prior ./build.py.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -26,7 +28,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cursorsheet  # noqa: E402
-from khtheme import kvantum, log, wallpapers  # noqa: E402
+import tempfile  # noqa: E402
+import widgetgallery  # noqa: E402
+from khtheme import kvantum, log, picker, wallpapers  # noqa: E402
 from khtheme.colorscheme import scheme_id  # noqa: E402
 from khtheme.palette import VARIANTS, Palette  # noqa: E402
 
@@ -83,8 +87,43 @@ def render_widgets(pal: Palette) -> bool:
     return result.returncode == 0
 
 
+def render_keyblades(pal: Palette) -> bool:
+    """The Keyblade Browser menu as the desktop would show it, offering the
+    keyblades of the built cursor theme."""
+    tool = picker.preview_tool(DIST)
+    if not tool.is_file():
+        log.error("preview", "keyblade browser not built; run ./build.py --only picker", expected=str(tool))
+        return False
+    scheme = DIST / "color-schemes" / f"{scheme_id(pal)}.colors"
+    target = OUT / f"keyblades-{pal.key}.png"
+    with tempfile.TemporaryDirectory(prefix="khpicker-") as config:
+        env = dict(os.environ)
+        env.update(widgetgallery.styled_environment(Path(config), scheme, kvantum.style_key(pal), DIST / "Kvantum" / kvantum.THEME))
+        env["QT_PLUGIN_PATH"] = str(picker.plugin_root(DIST))
+        env["KH_CURSOR_DIRS"] = str(DIST / "cursors")
+        try:
+            result = subprocess.run([str(tool), str(target)], env=env, capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired as exc:
+            log.error("preview", "keyblade menu timed out", error=exc, variant=pal.key)
+            return False
+    if result.returncode != 0:
+        log.error("preview", "keyblade menu failed", variant=pal.key, stderr=result.stderr[-1500:])
+        return False
+    try:
+        summary = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        log.error("preview", "keyblade menu summary unreadable", error=exc, variant=pal.key, output=result.stdout[-300:])
+        return False
+    buttons = summary.get("buttons", [])
+    unnamed = [b["slug"] for b in buttons if not b.get("tooltip")]
+    log.info("preview", "rendered", scene=f"keyblades-{pal.key}", target=str(target), style=summary.get("style"),
+             entries=summary.get("entries"), keyblades=len(buttons), caption=summary.get("caption"),
+             checked=[b["slug"] for b in buttons if b.get("checked")], without_name=unnamed)
+    return bool(buttons) and not unnamed
+
+
 # Scenes that are not QML: name -> renderer(pal) -> success.
-STATIC = {"cursors": render_cursors, "widgets": render_widgets}
+STATIC = {"cursors": render_cursors, "widgets": render_widgets, "keyblades": render_keyblades}
 
 
 def main() -> int:
