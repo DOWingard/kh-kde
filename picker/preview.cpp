@@ -8,6 +8,7 @@
 // Prints a JSON summary of the menu (entries, buttons, tooltips, caption) on stdout.
 #include "khlog.h"
 
+#include <KPluginMetaData>
 #include <Plasma/ContainmentActions>
 #include <Plasma/PluginLoader>
 
