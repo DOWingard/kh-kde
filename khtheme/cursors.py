@@ -45,8 +45,7 @@ OUTLINE = 1.5  # outline thickness on the design grid
 
 # Image height relative to the nominal cursor size. A keyblade is a thin
 # diagonal, so it has to be drawn larger than an arrow to carry the same weight.
-# The sprites are pixel art and are enlarged by the nearest whole multiple.
-KEY_SCALE = 2.0
+KEY_SCALE = 1.5
 GLOVE_SCALE = 1.45
 SPRITE_SCALE = 2.0
 SIDE_SPRITE_SCALE = 1.3  # the sprite riding beside the pointer on "progress"
@@ -266,19 +265,24 @@ def _make(args: list[str], out: Path, what: str) -> _Art:
 
 
 def _stylise(
-    source: list[str], height: int, nominal: int, rim: str, out: Path, what: str, trim: bool = True, pixels: int = 0
+    source: list[str], height: int, nominal: int, rim: str, out: Path, what: str, trim: bool = True,
+    pixel_art: bool = False,
 ) -> _Art:
     """Scale sourced art to `height` and set it on a soft drop shadow, with an
-    optional outline so it stays readable on any surface. Pixel art passes a
-    whole-number `pixels` factor instead, and is enlarged without smoothing."""
+    optional outline so it stays readable on any surface. Pixel art is first
+    enlarged without smoothing by the whole multiple just above `height`, so
+    each source pixel is a sharp square, and only then resampled to `height`:
+    sampling straight to a fractional size would draw rows and columns at
+    uneven widths and bend the shapes."""
     k = nominal / 24
     pad = math.ceil(4 * k)
     drop = max(1, round(1.2 * k))
     args = [*source]
     if trim:
         args += ["-trim", "+repage"]
-    if pixels:
-        args += ["-sample", f"{pixels * 100}%"]
+    if pixel_art:
+        source_height = int(_run(["magick", source[0], "-format", "%h", "info:"], f"{what}: read size"))
+        args += ["-sample", f"{math.ceil(height / source_height) * 100}%", "-filter", "Lanczos", "-resize", f"x{height}"]
     else:
         args += ["-filter", "Lanczos", "-resize", f"x{height}"]
     args += ["-bordercolor", "none", "-border", str(pad)]
@@ -402,12 +406,12 @@ def _size_set(
     def single(art: _Art, hot: tuple[int, int]) -> list[Image]:
         return [(nominal, art.w, art.h, hot[0], hot[1], 0, _compose(art.w, art.h, [(art, 0, 0)], "pack"))]
 
-    factor = keyblades.factor(nominal, KEY_SCALE)
+    key_height = round(nominal * KEY_SCALE)
     keys: dict[str, tuple[_Art, tuple[int, int]]] = {}
     for slug, sprite in sprites.items():
         art = _stylise(
-            [str(sprite)], 0, nominal, pal.pointer_rim, store / "keys" / f"{slug}-{nominal}.png", f"keyblade {slug}",
-            trim=False, pixels=factor,
+            [str(sprite)], key_height, nominal, pal.pointer_rim, store / "keys" / f"{slug}-{nominal}.png",
+            f"keyblade {slug}", trim=False, pixel_art=True,
         )
         keys[slug] = (art, _tip_top_left(art))
     key = keys[keyblades.MAIN][0]
@@ -468,7 +472,7 @@ def _size_set(
     for name, spec in keyed.items():
         out[name] = _keyed_images(nominal, spec, main_key, main_hot, name)
     log.debug("cursors", "size rendered", variant=pal.key, nominal=nominal, cursors=len(out), frames=len(frames),
-              keyblades=len(keys), key_px=f"{key.w}x{key.h}", pixel_factor=factor)
+              keyblades=len(keys), key_px=f"{key.w}x{key.h}", key_height=key_height)
     return _SizeSet(out, keys, keyed)
 
 

@@ -70,12 +70,6 @@ def by_slug(slug: str) -> Keyblade:
     raise KeyError(f"unknown keyblade {slug!r}; choose from {[k.slug for k in KEYBLADES]}")
 
 
-def factor(nominal: int, scale: float) -> int:
-    """Whole-number enlargement for a cursor size, so pixel art stays crisp:
-    the multiple that brings the canvas closest to `scale` times the size."""
-    return max(1, round(scale * nominal / CANVAS[1]))
-
-
 def _magick(args: list[str], what: str) -> str:
     try:
         return subprocess.run(["magick", *args], check=True, capture_output=True, text=True, timeout=60).stdout

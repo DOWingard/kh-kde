@@ -479,8 +479,10 @@ journal: `journalctl --user -u plasma-plasmashell`.
 - Text beam, resize arrows and grab hands have no counterpart in the games;
   they are drawn to match the menu glove (white with a dark outline). Cursor
   shapes not produced here fall back to Breeze's.
-- The keyblades are pixel art and are enlarged by whole multiples only (×2 at
-  cursor sizes 24 and 32, ×4 at 48, ×5 at 64), so they stay sharp; sizes 24
-  and 32 therefore show the same keyblade.
+- The keyblades are pixel art drawn 1.5 times the cursor size (36 pixels tall
+  at size 24). That is not a whole multiple of the sprites, so each is first
+  enlarged without smoothing by the whole multiple above it and then resampled
+  down: slightly soft, but without the uneven rows a direct fractional
+  enlargement would give.
 - The Plasma Style overrides only the surfaces that define the look; the rest
   falls back to Breeze's colour-scheme-driven graphics.
