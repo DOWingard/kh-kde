@@ -323,7 +323,7 @@ Decoration {
         width: root.width - 2 * x
         height: root.maxed ? root.maximizedTitleHeight : root.titleHeight
 
-        ButtonGroup {
+        KhButtonGroup {
             id: leftButtons
             height: @@EMBLEM@@
             spacing: @@SPACING@@
@@ -342,7 +342,7 @@ Decoration {
             anchors { left: parent.left; leftMargin: @@EDGE@@; verticalCenter: parent.verticalCenter }
         }
 
-        ButtonGroup {
+        KhButtonGroup {
             id: rightButtons
             height: @@EMBLEM@@
             spacing: @@SPACING@@
@@ -519,6 +519,100 @@ Item {
 }
 """
 
+GROUP_QML = """import QtQuick
+import org.kde.kwin.decoration
+
+// Title-bar buttons in the order set in System Settings. A button whose action
+// cannot do anything for this window is left out rather than drawn: context
+// help exists only for applications that offer it (X11 ones, never Wayland
+// ones), "on all desktops" only once there is a second virtual desktop, the
+// application menu only for applications that export one, and minimize,
+// maximize, close and shade only when the window allows them. Each button comes
+// back as soon as its action becomes possible.
+Row {
+    id: group
+
+    property var buttons: []
+    property real explicitSpacer: 0
+
+    property Component menuButton
+    property Component appMenuButton
+    property Component allDesktopsButton
+    property Component helpButton
+    property Component minimizeButton
+    property Component maximizeButton
+    property Component keepAboveButton
+    property Component keepBelowButton
+    property Component shadeButton
+    property Component closeButton
+
+    // Types of the buttons currently drawn, in order.
+    function shown() {
+        const types = [];
+        for (let i = 0; i < slots.count; i++) {
+            const slot = slots.itemAt(i);
+            if (slot && slot.available) {
+                types.push(slot.type);
+            }
+        }
+        return types;
+    }
+
+    function component(type) {
+        switch (type) {
+        case DecorationOptions.DecorationButtonMenu: return group.menuButton;
+        case DecorationOptions.DecorationButtonApplicationMenu: return group.appMenuButton;
+        case DecorationOptions.DecorationButtonOnAllDesktops: return group.allDesktopsButton;
+        case DecorationOptions.DecorationButtonQuickHelp: return group.helpButton;
+        case DecorationOptions.DecorationButtonMinimize: return group.minimizeButton;
+        case DecorationOptions.DecorationButtonMaximizeRestore: return group.maximizeButton;
+        case DecorationOptions.DecorationButtonKeepAbove: return group.keepAboveButton;
+        case DecorationOptions.DecorationButtonKeepBelow: return group.keepBelowButton;
+        case DecorationOptions.DecorationButtonShade: return group.shadeButton;
+        case DecorationOptions.DecorationButtonClose: return group.closeButton;
+        case DecorationOptions.DecorationButtonExplicitSpacer: return spacer;
+        default: return null;
+        }
+    }
+
+    function usable(type) {
+        const client = decoration.client;
+        switch (type) {
+        case DecorationOptions.DecorationButtonApplicationMenu: return client.hasApplicationMenu;
+        case DecorationOptions.DecorationButtonOnAllDesktops: return decorationSettings.onAllDesktopsAvailable;
+        case DecorationOptions.DecorationButtonQuickHelp: return client.providesContextHelp;
+        case DecorationOptions.DecorationButtonMinimize: return client.minimizeable;
+        case DecorationOptions.DecorationButtonMaximizeRestore: return client.maximizeable;
+        case DecorationOptions.DecorationButtonShade: return client.shadeable;
+        case DecorationOptions.DecorationButtonClose: return client.closeable;
+        default: return true;
+        }
+    }
+
+    Repeater {
+        id: slots
+        model: group.buttons
+        delegate: Loader {
+            required property int modelData
+            readonly property int type: modelData
+            readonly property bool available: group.component(type) !== null && group.usable(type)
+            // A hidden slot takes no room and no spacing in the row.
+            visible: available
+            active: available
+            sourceComponent: group.component(type)
+        }
+    }
+
+    Component {
+        id: spacer
+        Item {
+            width: group.explicitSpacer
+            height: group.height
+        }
+    }
+}
+"""
+
 
 def _values(pal: Palette) -> dict[str, object]:
     return {
@@ -642,6 +736,7 @@ def build(out: Path, pal: Palette) -> Path:
         write_text(root / "contents" / "ui" / "main.qml", fill_template(MAIN_QML, values))
         write_text(root / "contents" / "ui" / "KhButton.qml", fill_template(BUTTON_QML, values))
         write_text(root / "contents" / "ui" / "KhMenuButton.qml", fill_template(MENU_QML, values))
+        write_text(root / "contents" / "ui" / "KhButtonGroup.qml", GROUP_QML)
 
         count = 0
         with tempfile.TemporaryDirectory(prefix="khdeco-") as tmp_name:
