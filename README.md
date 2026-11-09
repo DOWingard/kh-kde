@@ -390,7 +390,9 @@ the window decoration, the Plasma Style or the keyblade browser.
 ```
 
 It pushes HEAD to a temporary branch, waits for CI, and moves `main` to it only
-if every check passed. Pull requests work too. To run the same checks before
+if every check passed. The temporary branch is then deleted, and after a
+landing so is its CI run (`main` runs CI on the commit itself); a failed run
+stays for its logs. Pull requests work too. To run the same checks before
 pushing (needs Docker; tests the committed HEAD):
 
 ```sh
