@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 
 from . import log, wallpapers
-from .palette import ORG_XIII, VARIANTS, Palette
+from .palette import ORG_XIII, VARIANTS, WHITE, Palette, mix
 from .svg import write_text
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
@@ -21,6 +21,16 @@ FONTS = ASSETS / "fonts"
 FONT = "KHMenuBold.otf"
 
 THEME_ID = "KingdomHearts"
+
+# A picture counts as dark below this mean luminance (0..1); text laid over it
+# is then light whatever the variant's own tone.
+DARK_PICTURE = 0.42
+# Where the login column may stand, as a share of the screen width. The centre
+# wins unless a side is calmer by more than CENTRE_BIAS.
+COLUMNS = (0.5, 0.27, 0.73)
+CENTRE_BIAS = 1.25
+# Part of the screen the column covers: width share, and height share from the top.
+COLUMN_SPAN = (0.34, 0.62)
 
 MAIN_QML = r"""import QtQuick
 
@@ -69,10 +79,14 @@ Rectangle {
     }
     Rectangle { anchors.fill: parent; color: root.t.scrim; opacity: root.t.scrimOpacity }
 
+    // The clock, emblem and login card share this axis. It stands over the
+    // calm part of the picture rather than always in the middle.
+    Item { id: axis; x: Math.round(root.width * root.t.loginX); width: 0; height: 1 }
+
     // ---- clock ----
     Column {
         id: clock
-        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.horizontalCenter: axis.horizontalCenter
         y: Math.round(root.height * 0.07)
         spacing: Math.round(4 * root.u)
         property date now: new Date()
@@ -97,7 +111,7 @@ Rectangle {
     // ---- emblem + title card ----
     Image {
         id: emblem
-        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.horizontalCenter: axis.horizontalCenter
         anchors.top: clock.bottom
         anchors.topMargin: Math.round(30 * root.u)
         source: "assets/emblem-" + root.variantKey + ".png"
@@ -108,7 +122,7 @@ Rectangle {
     }
     Text {
         id: world
-        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.horizontalCenter: axis.horizontalCenter
         anchors.top: emblem.bottom
         anchors.topMargin: Math.round(18 * root.u)
         text: root.t.world
@@ -121,7 +135,7 @@ Rectangle {
     }
     Rectangle {
         id: rule
-        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.horizontalCenter: axis.horizontalCenter
         anchors.top: world.bottom
         anchors.topMargin: Math.round(12 * root.u)
         width: Math.round(world.width * 0.6)
@@ -151,7 +165,7 @@ Rectangle {
             verticalAlignment: Text.AlignVCenter
             visible: input.text.length === 0
             text: field.placeholder
-            color: root.t.textDim
+            color: root.t.fieldDim
             font: input.font
         }
         TextInput {
@@ -161,7 +175,7 @@ Rectangle {
             anchors.rightMargin: Math.round(14 * root.u)
             verticalAlignment: TextInput.AlignVCenter
             clip: true
-            color: root.t.text
+            color: root.t.fieldText
             selectionColor: root.t.select
             selectedTextColor: root.t.selectText
             font.pixelSize: Math.round(16 * root.u)
@@ -199,7 +213,7 @@ Rectangle {
     // ---- login card ----
     Rectangle {
         id: card
-        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.horizontalCenter: axis.horizontalCenter
         anchors.top: rule.bottom
         anchors.topMargin: Math.round(34 * root.u)
         width: form.width + Math.round(56 * root.u)
@@ -330,18 +344,75 @@ def _rgba(hex_color: str, alpha: float) -> str:
     return f"#{round(alpha * 255):02x}{hex_color.lstrip('#')}"
 
 
-def _variant_colors(pal: Palette) -> dict:
-    return {
+def _measure(image: Path, operations: list[str], what: str, statistic: str = "mean") -> float:
+    """A statistic (0..1) of the picture after `operations`."""
+    cmd = ["magick", str(image), *operations, "-format", f"%[fx:{statistic}]", "info:"]
+    try:
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60)
+        return float(result.stdout.strip())
+    except FileNotFoundError as exc:
+        log.error("sddm", f"{what}: ImageMagick is not installed", error=exc)
+        raise
+    except subprocess.TimeoutExpired as exc:
+        log.error("sddm", f"{what} timed out", error=exc, image=image.name)
+        raise
+    except subprocess.CalledProcessError as exc:
+        log.error("sddm", f"{what} failed", error=exc, image=image.name, stderr=exc.stderr[-800:])
+        raise
+    except ValueError as exc:
+        log.error("sddm", f"{what}: unexpected output", error=exc, image=image.name)
+        raise
+
+
+def _login_column(image: Path, size: tuple[int, int]) -> tuple[float, dict[float, float]]:
+    """Centre of the calmest place for the login column, and the detail found at each candidate.
+
+    Detail is the spread of brightness under the column. (An edge filter's
+    mean is no use here: its kernel sums to zero, so the mean is only noise.)
+    """
+    width, height = size
+    w, h = round(width * COLUMN_SPAN[0]), round(height * COLUMN_SPAN[1])
+    detail = {}
+    for centre in COLUMNS:
+        x = max(0, min(width - w, round(width * centre - w / 2)))
+        detail[centre] = _measure(
+            image, ["-crop", f"{w}x{h}+{x}+0", "+repage", "-colorspace", "Gray"], "measure picture detail",
+            statistic="standard_deviation",
+        )
+    calmest = min(detail, key=detail.get)
+    middle = COLUMNS[0]
+    return (middle if detail[middle] <= detail[calmest] * CENTRE_BIAS else calmest), detail
+
+
+def _variant_colors(pal: Palette, picture: Path | None, size: tuple[int, int] = (1920, 1080)) -> dict:
+    """Login colours for a variant, read off the picture it is shown over.
+
+    Without a picture (its variant is not built yet) the variant's own tone and
+    a centred column are assumed.
+    """
+    login_x = COLUMNS[0]
+    picture_dark = pal.dark
+    if picture is not None:
+        tone = _measure(picture, ["-colorspace", "Gray"], "measure picture tone")
+        picture_dark = tone < DARK_PICTURE
+        login_x, detail = _login_column(picture, size)
+        log.info("sddm", "login screen fitted to the picture", variant=pal.key, picture=picture.parent.parent.parent.name,
+                 tone=round(tone, 3), dark=picture_dark, column=login_x,
+                 detail={str(c): round(v, 4) for c, v in detail.items()})
+    colors = {
         "base": pal.complementary if pal.dark else pal.window,
         "scrim": pal.scrim[0],
         "scrimOpacity": pal.scrim[1],
         "world": pal.world,
+        "loginX": login_x,
         "text": pal.text,
         "textDim": pal.text_dim,
         "ornament": pal.ornament if pal.dark else pal.ornament_deep,
         "glass": _rgba(pal.glass_bot, 0.78),
         "edge": _rgba(pal.edge_top[0], 0.7),
         "field": _rgba(pal.view, 0.9),
+        "fieldText": pal.text,
+        "fieldDim": pal.text_dim,
         "line": _rgba(pal.text_dim, 0.45),
         "focus": pal.focus,
         "select": pal.select,
@@ -353,10 +424,46 @@ def _variant_colors(pal: Palette) -> dict:
         # Square fields for the clipped style, rounded ones for the heading style.
         "radius": 0 if pal.corner == "cut" else 10,
     }
+    if picture_dark and not pal.dark:
+        # A light variant over a dark picture: everything outside the input
+        # fields switches to the variant's always-dark set, so the screen reads
+        # like the navy menus of the first game instead of washing the picture out.
+        colors.update(
+            base=pal.complementary,
+            scrim=pal.complementary_alt,
+            scrimOpacity=0.3,
+            text=pal.complementary_text,
+            textDim=mix(pal.complementary_text, pal.complementary, 0.3),
+            ornament=pal.ornament,
+            glass=_rgba(pal.complementary, 0.82),
+            negative=mix(pal.negative, WHITE, 0.45),
+            neutral=mix(pal.neutral, WHITE, 0.25),
+        )
+    elif pal.dark and not picture_dark:
+        # A dark variant over a bright picture keeps its light text; the wash has to carry it.
+        colors["scrimOpacity"] = max(colors["scrimOpacity"], 0.62)
+        log.info("sddm", "bright picture under a dark variant; wash strengthened", variant=pal.key)
+    return colors
 
 
-def main_qml() -> str:
-    variants = {pal.key: _variant_colors(pal) for pal in VARIANTS}
+def _picture(out: Path, pal: Palette, size: tuple[int, int] = (1920, 1080)) -> Path | None:
+    """The variant's built default picture, or None while its wallpapers are not built.
+
+    While one variant is being built the other's picture may not exist yet;
+    that is expected, so it is not reported as a failure here.
+    """
+    path = (out / "wallpapers" / wallpapers.default_for(pal).package_id / "contents" / "images"
+            / f"{size[0]}x{size[1]}.jpg")
+    return path if path.is_file() else None
+
+
+def main_qml(out: Path) -> str:
+    variants = {}
+    for pal in VARIANTS:
+        picture = _picture(out, pal)
+        if picture is None:
+            log.info("sddm", "default picture is not built yet; login colours assume the variant's own tone", variant=pal.key)
+        variants[pal.key] = _variant_colors(pal, picture)
     return MAIN_QML % {"variants": json.dumps(variants, indent=8, ensure_ascii=False), "fallback": ORG_XIII.key}
 
 
@@ -399,7 +506,7 @@ def build(out: Path, pal: Palette) -> Path:
     root = out / "sddm" / THEME_ID
     with log.timed("sddm", "build login theme", variant=pal.key, target=str(root)):
         wallpaper = wallpapers.default_image(out, pal)
-        write_text(root / "Main.qml", main_qml())
+        write_text(root / "Main.qml", main_qml(out))
         write_text(root / "metadata.desktop", METADATA)
         write_text(root / "theme.conf", THEME_CONF)
         assets = root / "assets"
