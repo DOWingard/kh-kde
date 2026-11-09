@@ -7,16 +7,36 @@ this directory or the built `dist/` as if it were freely licensed.
 
 Files were resized, cropped or re-encoded as noted; none was redrawn.
 
-## `assets/reference/` — pointer and launcher emblems
+## `assets/reference/` — launcher emblems and colour references
 
 Supplied by the theme's owner as the art to build on.
 
 | File | What it is | Origin |
 | --- | --- | --- |
-| `kingdom-key.png` | Kingdom Key render (light pointer) | kh13.com gallery upload |
-| `kingdom-key-d.png` | Kingdom Key D sprite (dark pointer) | kh13.com gallery upload |
+| `kingdom-key.png` | Kingdom Key render (colour reference) | kh13.com gallery upload |
+| `kingdom-key-d.png` | Kingdom Key D sprite (colour reference: the gold, silver and bronze tokens) | kh13.com gallery upload |
 | `kh-heart-crown.png` | Series heart-and-crown emblem (light launcher) | pngegg.com |
 | `nobody-sigil.png` | Nobody sigil (dark launcher) | pngaaa.com |
+
+## `assets/keyblades/` — pointer keyblades
+
+Item sprites from *Kingdom Hearts: Chain of Memories* (Game Boy Advance),
+supplied by the theme's owner as two sheets downloaded from The Spriters
+Resource ("Kingdom Hearts: Chain of Memories → Miscellaneous → Keyblades", per
+the downloaded file names). Stored unmodified; the build cuts each sprite out
+and enlarges it by whole multiples.
+
+| File | What it is |
+| --- | --- |
+| `kingdom-key.png` | The Kingdom Key on its own: the main pointer |
+| `sheet.png` | Every keyblade of the game in two columns |
+
+The sheet's own Kingdom Key is pixel-identical to `kingdom-key.png` and is not
+used. Where each sprite sits on the sheet, and its name, is the `KEYBLADES`
+table in `khtheme/keyblades.py`; the names were matched by eye against the
+first game's renders on the Kingdom Hearts Wiki (<https://www.khwiki.com>).
+Soul Eater is Riku's sword rather than a keyblade, but it is on the sheet and
+offered like the others.
 
 ## `assets/loading/` — busy-cursor and splash sprites
 

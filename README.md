@@ -5,7 +5,7 @@ vocabulary, taken from the series' own art:
 
 | Variant | Mode | Look |
 | --- | --- | --- |
-| **Organization XIII** (`OrgXIII`) | dark | Black with white accents, after the black command menu of the second game: clipped corners, white hairlines, white selection bars with black text. Kingdom Key D gold appears only on links and the pointer. |
+| **Organization XIII** (`OrgXIII`) | dark | Black with white accents, after the black command menu of the second game: clipped corners, white hairlines, white selection bars with black text. Kingdom Key D gold appears only on links. |
 | **Sora** (`Sora`) | light | The first game's colours: logo blue title bars and selection, crown gold rules and ornaments, navy text, frames shaped like that game's menu headings (one rounded corner, one square). |
 
 Colours come from the reference art, not from taste: the logo's heart blue
@@ -36,8 +36,9 @@ For each variant:
   bars and sliders in the same shapes. Organization XIII selects with the white
   bar and black text of the second game's command menu; Sora with logo blue
   and the gold bar down the left of the first game's menus
-- **Cursor theme**: the Kingdom Key (Sora) or Kingdom Key D (Organization XIII)
-  as pointer, the menu glove on links, a walking Sora or Roxas while busy
+- **Cursor theme**: the Kingdom Key sprite from *Chain of Memories* as
+  pointer, the menu glove on links, a walking Sora or Roxas while busy. The
+  pointer can be any of the game's 18 keyblades (see *Keyblades* below)
 - **Icon theme**: heart-and-crown or Nobody sigil as the application launcher,
   on top of Breeze
 - **Wallpapers**: four to six pictures per variant
@@ -177,7 +178,7 @@ file names the art each variant uses:
 
 | Token | Meaning |
 | --- | --- |
-| `pointer_art` | keyblade image used as the mouse pointer (`assets/reference/`) |
+| `pointer_rim` | outline drawn round the keyblade pointer so it reads on the variant's surfaces |
 | `launcher_art` | emblem for the launcher, window menu and login screen |
 | `loading_art` | animated sprite for busy cursors and the splash (`assets/loading/`) |
 | `corner` | frame shapes: `cut` (clipped) or `heading` (rounded on opposite corners) |
@@ -283,7 +284,8 @@ The tools write one JSON object per line to stderr with `timestamp`, `level`,
 - Text beam, resize arrows and grab hands have no counterpart in the games;
   they are drawn to match the menu glove (white with a dark outline). Cursor
   shapes not produced here fall back to Breeze's.
-- The Kingdom Key D art is 94×100 px, so its pointer is sharpest at cursor
-  sizes up to 48.
+- The keyblades are pixel art and are enlarged by whole multiples only (×2 at
+  cursor sizes 24 and 32, ×4 at 48, ×5 at 64), so they stay sharp; sizes 24
+  and 32 therefore show the same keyblade.
 - The Plasma Style overrides only the surfaces that define the look; the rest
   falls back to Breeze's colour-scheme-driven graphics.

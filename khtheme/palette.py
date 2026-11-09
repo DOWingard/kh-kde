@@ -144,7 +144,6 @@ class Palette:
     tint: float = 1.0
 
     # --- sourced art (file names under assets/) ---
-    pointer_art: str = ""  # reference/<file>: the keyblade used as the mouse pointer
     launcher_art: str = ""  # reference/<file>: the application-launcher emblem
     # Colour to repaint the emblem's whole silhouette with where it is shown as
     # an icon; empty keeps the art's own colours. An outline in the surface
@@ -153,6 +152,8 @@ class Palette:
     loading_art: str = ""  # loading/<file>: animated sprite for busy cursors and splash
     # Outline colours drawn round sourced cursor art so it reads on the
     # variant's own surfaces; empty when the art already carries an outline.
+    # The keyblade sprites have black outlines of their own, which vanish on
+    # dark surfaces, so the dark variant rims them in light.
     pointer_rim: str = ""
     sprite_rim: str = ""
 
@@ -273,10 +274,10 @@ ORG_XIII = Palette(
     scrim=(BLACK, 0.45),
     corner="cut",
     tint=0.3,
-    pointer_art="kingdom-key-d.png",
     launcher_art="nobody-sigil.png",
     launcher_flat=WHITE,
     loading_art="roxas.gif",
+    pointer_rim=_WHITE_SOFT,
     sprite_rim=_WHITE_SOFT,
     cursor_fill=WHITE,
     cursor_line="#101012",
@@ -354,7 +355,6 @@ SORA = Palette(
     scrim=(WHITE, 0.38),
     corner="heading",
     tint=0.42,
-    pointer_art="kingdom-key.png",
     launcher_art="kh-heart-crown.png",
     loading_art="sora.gif",
     pointer_rim="#12203c",

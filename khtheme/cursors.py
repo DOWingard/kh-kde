@@ -1,6 +1,6 @@
 """Mouse cursor themes built from the sourced art.
 
-The pointer is the variant's keyblade, links use the menu glove, and the busy
+The pointer is a keyblade sprite, links use the menu glove, and the busy
 cursors play the variant's walking sprite. Shapes with no counterpart in the
 source material (text beam, resize arrows, hands) are drawn as vectors in the
 glove's style: white fill, dark outline.
@@ -8,10 +8,20 @@ glove's style: white fill, dark outline.
 Images are composed with ImageMagick and written in the Xcursor binary format
 directly, so no xcursorgen is needed. Shapes that are not produced here are
 inherited from Breeze's cursor theme.
+
+Every keyblade can be the pointer. The cursors that show it (`KEYED`) are
+written with the main keyblade, and the theme folder also carries what is
+needed to rewrite them with any other: under `keyblades/`, each keyblade
+drawn at every size (`keys/`), everything drawn over it on each cursor and
+frame (`overlays/`, full-canvas images), and `manifest.json` tying them
+together with sizes, hotspots and frame delays. A cursor image is then the
+key at the origin with the overlay on top, which the keyblade switcher
+repeats for the chosen keyblade.
 """
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import shutil
@@ -22,7 +32,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import log
+from . import keyblades, log
 from .palette import Palette
 from .svg import fmt, write_text
 
@@ -35,6 +45,7 @@ OUTLINE = 1.5  # outline thickness on the design grid
 
 # Image height relative to the nominal cursor size. A keyblade is a thin
 # diagonal, so it has to be drawn larger than an arrow to carry the same weight.
+# The sprites are pixel art and are enlarged by the nearest whole multiple.
 KEY_SCALE = 2.0
 GLOVE_SCALE = 1.45
 SPRITE_SCALE = 2.0
@@ -155,6 +166,9 @@ def _badges(pal: Palette) -> dict[str, tuple[str, str]]:
 
 
 RASTER_CURSORS = ["default", "pointer", "wait", "progress", "help", "copy", "alias"]
+# The raster cursors that show the keyblade, and so change with it.
+KEYED = ["default", "progress", "help", "copy", "alias"]
+MANIFEST_FORMAT = 1
 
 ALIASES = {
     "default": ["left_ptr", "arrow", "top_left_arrow"],
@@ -251,16 +265,23 @@ def _make(args: list[str], out: Path, what: str) -> _Art:
     return _Art(out, w, h)
 
 
-def _stylise(source: list[str], height: int, nominal: int, rim: str, out: Path, what: str, trim: bool = True) -> _Art:
+def _stylise(
+    source: list[str], height: int, nominal: int, rim: str, out: Path, what: str, trim: bool = True, pixels: int = 0
+) -> _Art:
     """Scale sourced art to `height` and set it on a soft drop shadow, with an
-    optional outline so it stays readable on any surface."""
+    optional outline so it stays readable on any surface. Pixel art passes a
+    whole-number `pixels` factor instead, and is enlarged without smoothing."""
     k = nominal / 24
     pad = math.ceil(4 * k)
     drop = max(1, round(1.2 * k))
     args = [*source]
     if trim:
         args += ["-trim", "+repage"]
-    args += ["-filter", "Lanczos", "-resize", f"x{height}", "-bordercolor", "none", "-border", str(pad)]
+    if pixels:
+        args += ["-sample", f"{pixels * 100}%"]
+    else:
+        args += ["-filter", "Lanczos", "-resize", f"x{height}"]
+    args += ["-bordercolor", "none", "-border", str(pad)]
     args += [
         "(", "-clone", "0", "-alpha", "extract", "-blur", f"0x{fmt(0.9 * k)}", "-roll", f"+{max(1, drop // 2)}+{drop}",
         "-evaluate", "multiply", "0.45", "-background", "black", "-alpha", "shape", ")",
@@ -315,6 +336,11 @@ def _compose(width: int, height: int, layers: list[tuple[_Art, int, int]], what:
     return pixels
 
 
+def _place(art: _Art, x: int, y: int, width: int, height: int, out: Path, what: str) -> _Art:
+    """Put art at (x, y) on a transparent canvas of the given size."""
+    return _make(["-size", f"{width}x{height}", "xc:none", str(art.path), "-geometry", f"+{x}+{y}", "-composite"], out, what)
+
+
 def _rsvg(svg: str, px: int, out: Path, what: str) -> _Art:
     source = out.with_suffix(".svg")
     source.write_text(svg, encoding="utf-8")
@@ -339,8 +365,36 @@ def _sprite_frames(gif: Path, tmp: Path) -> tuple[list[Path], int]:
     return frames, delay
 
 
-def _size_set(pal: Palette, nominal: int, tmp: Path, frames: list[Path], delay: int) -> dict[str, list[Image]]:
-    """Every cursor at one nominal size."""
+@dataclass(frozen=True)
+class _Keyed:
+    """A cursor that shows the keyblade: its canvas and, for each frame, the
+    art drawn over the key (None for none) and the frame delay in ms."""
+
+    width: int
+    height: int
+    frames: list[tuple[_Art | None, int]]
+
+
+@dataclass(frozen=True)
+class _SizeSet:
+    images: dict[str, list[Image]]  # every cursor, keyed ones with the main keyblade
+    keys: dict[str, tuple[_Art, tuple[int, int]]]  # keyblade -> drawn key and its hotspot
+    keyed: dict[str, _Keyed]
+
+
+def _keyed_images(nominal: int, spec: _Keyed, key: _Art, hot: tuple[int, int], what: str) -> list[Image]:
+    images = []
+    for overlay, delay in spec.frames:
+        layers = [(key, 0, 0)] + ([(overlay, 0, 0)] if overlay else [])
+        pixels = _compose(spec.width, spec.height, layers, what)
+        images.append((nominal, spec.width, spec.height, hot[0], hot[1], delay, pixels))
+    return images
+
+
+def _size_set(
+    pal: Palette, nominal: int, tmp: Path, frames: list[Path], delay: int, sprites: dict[str, Path], store: Path
+) -> _SizeSet:
+    """Every cursor at one nominal size, plus the parts of the keyed ones."""
     work = tmp / str(nominal)
     work.mkdir()
     out: dict[str, list[Image]] = {}
@@ -348,12 +402,20 @@ def _size_set(pal: Palette, nominal: int, tmp: Path, frames: list[Path], delay: 
     def single(art: _Art, hot: tuple[int, int]) -> list[Image]:
         return [(nominal, art.w, art.h, hot[0], hot[1], 0, _compose(art.w, art.h, [(art, 0, 0)], "pack"))]
 
-    key = _stylise(
-        [str(ASSETS / "reference" / pal.pointer_art)], round(nominal * KEY_SCALE), nominal,
-        pal.pointer_rim, work / "key.png", "pointer art",
-    )
-    key_hot = _tip_top_left(key)
-    out["default"] = single(key, key_hot)
+    factor = keyblades.factor(nominal, KEY_SCALE)
+    keys: dict[str, tuple[_Art, tuple[int, int]]] = {}
+    for slug, sprite in sprites.items():
+        art = _stylise(
+            [str(sprite)], 0, nominal, pal.pointer_rim, store / "keys" / f"{slug}-{nominal}.png", f"keyblade {slug}",
+            trim=False, pixels=factor,
+        )
+        keys[slug] = (art, _tip_top_left(art))
+    key = keys[keyblades.MAIN][0]
+    # The overlays are placed against the main keyblade's canvas, so every
+    # keyblade has to come out the same size for them to fit the others too.
+    odd = sorted(slug for slug, (art, _) in keys.items() if (art.w, art.h) != (key.w, key.h))
+    if odd:
+        raise ValueError(f"keyblades drawn at another size than {keyblades.MAIN} ({key.w}x{key.h}): {odd}")
 
     # The glove points right in the source; mirrored and turned it becomes a
     # right hand pointing up, the conventional link cursor.
@@ -364,14 +426,16 @@ def _size_set(pal: Palette, nominal: int, tmp: Path, frames: list[Path], delay: 
 
     # A keyblade runs corner to corner, so companions go in the empty corner
     # above the guard (badges) or just past it (the sprite) instead of on top.
-    def beside(art: _Art, fx: float, fy: float) -> tuple[int, int, list[tuple[_Art, int, int]]]:
+    def beside(art: _Art, fx: float, fy: float, label: str) -> tuple[int, int, _Art]:
         x, y = round(key.w * fx), round(key.h * fy)
-        return max(key.w, x + art.w), max(key.h, y + art.h), [(key, 0, 0), (art, x, y)]
+        w, h = max(key.w, x + art.w), max(key.h, y + art.h)
+        return w, h, _place(art, x, y, w, h, store / "overlays" / f"{label}-{nominal}.png", label)
 
+    keyed = {"default": _Keyed(key.w, key.h, [(None, 0)])}
     for name in _badges(pal):
         badge = _rsvg(badge_svg(pal, name), round(nominal * BADGE_SCALE), work / f"badge-{name}.png", "badge")
-        w, h, layers = beside(badge, 0.6, 0.04)
-        out[name] = [(nominal, w, h, key_hot[0], key_hot[1], 0, _compose(w, h, layers, name))]
+        w, h, overlay = beside(badge, 0.6, 0.04, name)
+        keyed[name] = _Keyed(w, h, [(overlay, 0)])
 
     px = round(nominal * VECTOR_SCALE)
     for name, ((hx, hy), _) in _vector_cursors().items():
@@ -379,7 +443,8 @@ def _size_set(pal: Palette, nominal: int, tmp: Path, frames: list[Path], delay: 
         out[name] = single(art, (round(hx * px / GRID), round(hy * px / GRID)))
 
     wait: list[Image] = []
-    progress: list[Image] = []
+    progress: list[tuple[_Art | None, int]] = []
+    canvases = set()
     for n, frame in enumerate(frames):
         big = _stylise(
             [str(frame)], round(nominal * SPRITE_SCALE), nominal, pal.sprite_rim, work / f"wait-{n:03d}.png", "sprite", trim=False
@@ -389,12 +454,59 @@ def _size_set(pal: Palette, nominal: int, tmp: Path, frames: list[Path], delay: 
             [str(frame)], round(nominal * SIDE_SPRITE_SCALE), nominal, pal.sprite_rim, work / f"side-{n:03d}.png", "sprite",
             trim=False,
         )
-        w, h, layers = beside(small, 0.86, 0.1)
-        progress.append((nominal, w, h, key_hot[0], key_hot[1], delay, _compose(w, h, layers, "progress")))
+        w, h, overlay = beside(small, 0.86, 0.1, f"progress-{n:03d}")
+        canvases.add((w, h))
+        progress.append((overlay, delay))
+    if len(canvases) != 1:
+        raise ValueError(f"busy sprite frames differ in size at {nominal}: {sorted(canvases)}")
     out["wait"] = wait
-    out["progress"] = progress
-    log.debug("cursors", "size rendered", variant=pal.key, nominal=nominal, cursors=len(out), frames=len(frames))
-    return out
+    keyed["progress"] = _Keyed(*canvases.pop(), progress)
+
+    if sorted(keyed) != sorted(KEYED):
+        raise KeyError(f"keyed cursors produced {sorted(keyed)} differ from KEYED {sorted(KEYED)}")
+    main_key, main_hot = keys[keyblades.MAIN]
+    for name, spec in keyed.items():
+        out[name] = _keyed_images(nominal, spec, main_key, main_hot, name)
+    log.debug("cursors", "size rendered", variant=pal.key, nominal=nominal, cursors=len(out), frames=len(frames),
+              keyblades=len(keys), key_px=f"{key.w}x{key.h}", pixel_factor=factor)
+    return _SizeSet(out, keys, keyed)
+
+
+def _manifest(per_size: dict[int, _SizeSet], store: Path) -> dict:
+    """What a keyblade switcher needs to rewrite the keyed cursors: paths are
+    relative to the manifest's folder, sizes are nominal cursor sizes."""
+
+    def rel(art: _Art | None) -> str | None:
+        return art.path.relative_to(store).as_posix() if art else None
+
+    return {
+        "format": MANIFEST_FORMAT,
+        "main": keyblades.MAIN,
+        "sizes": sorted(per_size),
+        "keyblades": [
+            {
+                "slug": kb.slug,
+                "name": kb.name,
+                "sprite": f"sprites/{kb.slug}.png",
+                "keys": {
+                    str(n): {"image": rel(s.keys[kb.slug][0]), "hotspot": list(s.keys[kb.slug][1])}
+                    for n, s in sorted(per_size.items())
+                },
+            }
+            for kb in keyblades.KEYBLADES
+        ],
+        "cursors": {
+            name: {
+                str(n): {
+                    "width": s.keyed[name].width,
+                    "height": s.keyed[name].height,
+                    "frames": [{"overlay": rel(overlay), "delay": delay} for overlay, delay in s.keyed[name].frames],
+                }
+                for n, s in sorted(per_size.items())
+            }
+            for name in KEYED
+        },
+    }
 
 
 def xcursor_bytes(images: list[Image]) -> bytes:
@@ -424,6 +536,7 @@ def build(out: Path, pal: Palette) -> Path:
     # place than icon themes, although both are "icon themes" on disk.
     root = out / "cursors" / pal.cursor_id
     target = root / "cursors"
+    store = root / "keyblades"
     with log.timed("cursors", "build cursor theme", variant=pal.key, target=str(target)):
         legacy = out / "icons" / pal.cursor_id
         if legacy.is_dir():
@@ -433,19 +546,28 @@ def build(out: Path, pal: Palette) -> Path:
         missing = set(ALIASES) - names
         if missing:
             raise KeyError(f"aliases defined for cursors that are not produced: {sorted(missing)}")
-        for needed in (ASSETS / "reference" / pal.pointer_art, GLOVE):
-            if not needed.is_file():
-                log.error("cursors", "cursor art is missing", path=str(needed), variant=pal.key)
-                raise FileNotFoundError(needed)
+        if not set(KEYED) <= names:
+            raise KeyError(f"keyed cursors that are not produced: {sorted(set(KEYED) - names)}")
+        if not GLOVE.is_file():
+            log.error("cursors", "cursor art is missing", path=str(GLOVE), variant=pal.key)
+            raise FileNotFoundError(GLOVE)
+        # Rebuilt from scratch so keyblades or frames dropped since the last
+        # build do not linger in the manifest's folder.
+        if store.exists():
+            shutil.rmtree(store)
+        for sub in ("keys", "overlays"):
+            (store / sub).mkdir(parents=True)
         target.mkdir(parents=True, exist_ok=True)
+        sprites = keyblades.cut(store / "sprites")
         with tempfile.TemporaryDirectory(prefix="khcursor-") as tmp_name:
             tmp = Path(tmp_name)
             frames, delay = _sprite_frames(ASSETS / "loading" / pal.loading_art, tmp)
             # The work is all in subprocesses, so threads scale across cores.
             with ThreadPoolExecutor(max_workers=min(len(SIZES), os.cpu_count() or 1)) as pool:
-                per_size = list(pool.map(lambda n: _size_set(pal, n, tmp, frames, delay), SIZES))
+                per_size = dict(zip(SIZES, pool.map(lambda n: _size_set(pal, n, tmp, frames, delay, sprites, store), SIZES)))
+        write_text(store / "manifest.json", json.dumps(_manifest(per_size, store), indent=1) + "\n")
         for name in sorted(names):
-            images = [image for size_set in per_size for image in size_set[name]]
+            images = [image for size_set in per_size.values() for image in size_set.images[name]]
             (target / name).write_bytes(xcursor_bytes(images))
             for alias in ALIASES.get(name, []):
                 link = target / alias
@@ -456,6 +578,6 @@ def build(out: Path, pal: Palette) -> Path:
         write_text(root / "index.theme", _index(pal))
         log.info(
             "cursors", "cursor theme written", variant=pal.key, cursors=len(names), sizes=SIZES,
-            sprite_frames=len(frames), frame_ms=delay,
+            sprite_frames=len(frames), frame_ms=delay, keyblades=len(sprites), main=keyblades.MAIN,
         )
     return target
