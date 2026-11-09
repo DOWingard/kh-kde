@@ -24,7 +24,8 @@ struct Keyblade {
 
 struct Theme {
     QString id; // directory name, as cursor settings know it
-    QString path;
+    QString path; // the copy the cursor loaders use: the first folder holding it
+    QString systemPath; // a package's read-only copy, when one is installed
 };
 
 struct Outcome {
@@ -32,8 +33,11 @@ struct Outcome {
     QStringList failures; // one line per theme that could not be rewritten
 };
 
-// Cursor themes of this project that can switch keyblades, in user-writable
-// icon folders. KH_CURSOR_DIRS (colon-separated) replaces the folders searched.
+// Cursor themes of this project that can switch keyblades: those in the
+// user's icon folders, then those a package installed system-wide. Equipping
+// rewrites a user copy, made from the system-wide one when needed.
+// KH_CURSOR_DIRS (colon-separated) replaces the folders searched, and every
+// folder in it is treated as the user's.
 QList<Theme> installedThemes();
 
 // The keyblades on offer, in menu order; empty with `error` set when no

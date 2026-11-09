@@ -4,7 +4,9 @@
 #include <KConfig>
 #include <KConfigGroup>
 
+#include <QDateTime>
 #include <QDir>
+#include <QDirIterator>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -17,7 +19,6 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSaveFile>
-#include <QSet>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QtEndian>
@@ -36,6 +37,9 @@ const QString kStandIn = QStringLiteral("breeze_cursors");
 const int kSwitchPauseMs = 1000;
 const int kManifestFormat = 1;
 const quint32 kXcursorImage = 0xfffd0002;
+// Inside a user copy of a system-wide theme: which package build it was made
+// from, so a package upgrade is noticed and the copy made again.
+const QString kSystemStamp = QStringLiteral("keyblades/system-copy");
 
 QJsonObject fields(std::initializer_list<std::pair<QString, QJsonValue>> list)
 {
@@ -46,21 +50,150 @@ QJsonObject fields(std::initializer_list<std::pair<QString, QJsonValue>> list)
     return object;
 }
 
-QStringList searchDirs()
+// Folders cursor themes may be rewritten in, in the cursor loaders' search
+// order. The first one receives user copies of system-wide themes.
+QStringList userDirs()
 {
     const QByteArray override = qgetenv("KH_CURSOR_DIRS");
     if (!override.isEmpty()) {
         return QString::fromLocal8Bit(override).split(QLatin1Char(':'), Qt::SkipEmptyParts);
     }
-    // The places this project installs cursor themes to; system folders are
-    // left alone, they are not ours to rewrite.
     return {QDir::homePath() + QStringLiteral("/.icons"),
             QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QStringLiteral("/icons")};
 }
 
+// Folders a package installs cursor themes to; they are only read.
+QStringList systemDirs()
+{
+    if (!qgetenv("KH_CURSOR_DIRS").isEmpty()) {
+        return {};
+    }
+    const QString home = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    QStringList dirs;
+    const QStringList locations = QStandardPaths::standardLocations(QStandardPaths::GenericDataLocation);
+    for (const QString &dir : locations) {
+        if (dir != home) {
+            dirs.append(dir + QStringLiteral("/icons"));
+        }
+    }
+    return dirs;
+}
+
+QStringList searchDirs()
+{
+    return userDirs() + systemDirs();
+}
+
+QString manifestPath(const QString &themePath)
+{
+    return themePath + QStringLiteral("/keyblades/manifest.json");
+}
+
+// Changes whenever the package's copy is replaced, as an upgrade does.
+QString systemStamp(const QString &systemPath)
+{
+    return QString::number(QFileInfo(manifestPath(systemPath)).lastModified().toMSecsSinceEpoch());
+}
+
+bool copyTree(const QString &from, const QString &to, QString *error)
+{
+    const QDir source(from);
+    if (!QDir().mkpath(to)) {
+        *error = QStringLiteral("cannot create %1").arg(to);
+        return false;
+    }
+    QDirIterator it(from, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        it.next();
+        const QFileInfo info = it.fileInfo();
+        const QString target = to + QLatin1Char('/') + source.relativeFilePath(info.filePath());
+        if (info.isSymLink()) {
+            // Cursor aliases are relative links; kept as written they point
+            // into the copy, so a rewritten shape shows under every alias.
+            if (!QFile::link(info.readSymLink(), target)) {
+                *error = QStringLiteral("cannot link %1").arg(target);
+                return false;
+            }
+        } else if (info.isDir()) {
+            if (!QDir().mkpath(target)) {
+                *error = QStringLiteral("cannot create %1").arg(target);
+                return false;
+            }
+        } else if (!QFile::copy(info.filePath(), target)) {
+            *error = QStringLiteral("cannot copy %1 to %2").arg(info.filePath(), target);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Copy the package's theme into the user's first icon folder, replacing an
+// earlier copy. Built aside and renamed into place.
+std::optional<Keyblades::Theme> copyToUser(const Keyblades::Theme &theme, QString *error)
+{
+    QElapsedTimer timer;
+    timer.start();
+    const QString base = userDirs().first();
+    const QString target = base + QLatin1Char('/') + theme.id;
+    const QString staging = base + QStringLiteral("/.") + theme.id + QStringLiteral(".copying");
+    QDir(staging).removeRecursively();
+    if (!copyTree(theme.systemPath, staging, error)) {
+        QDir(staging).removeRecursively();
+        return std::nullopt;
+    }
+    QSaveFile stamp(staging + QLatin1Char('/') + kSystemStamp);
+    if (!stamp.open(QIODevice::WriteOnly) || stamp.write(systemStamp(theme.systemPath).toUtf8()) < 0 || !stamp.commit()) {
+        *error = QStringLiteral("cannot write %1: %2").arg(stamp.fileName(), stamp.errorString());
+        QDir(staging).removeRecursively();
+        return std::nullopt;
+    }
+    if (QFileInfo::exists(target) && !QDir(target).removeRecursively()) {
+        *error = QStringLiteral("cannot replace the earlier copy at %1").arg(target);
+        QDir(staging).removeRecursively();
+        return std::nullopt;
+    }
+    if (!QDir().rename(staging, target)) {
+        *error = QStringLiteral("cannot move %1 to %2").arg(staging, target);
+        QDir(staging).removeRecursively();
+        return std::nullopt;
+    }
+    KhLog::info(kContext, QStringLiteral("system-wide cursor theme copied for this user"),
+                fields({{QStringLiteral("theme"), theme.id}, {QStringLiteral("from"), theme.systemPath},
+                        {QStringLiteral("to"), target}, {QStringLiteral("duration_ms"), qint64(timer.elapsed())}}));
+    return Keyblades::Theme{theme.id, target, theme.systemPath};
+}
+
+// The copy of `theme` that may be rewritten. A theme only a package installed
+// is copied to the user first; a copy made from an older package build is made
+// again. The user's own install (no stamp) is always used as it is.
+std::optional<Keyblades::Theme> writableCopy(const Keyblades::Theme &theme, QString *error)
+{
+    if (theme.systemPath.isEmpty()) {
+        return theme;
+    }
+    if (theme.path == theme.systemPath) {
+        KhLog::debug(kContext, QStringLiteral("theme is installed system-wide only; copying it for this user"),
+                     fields({{QStringLiteral("theme"), theme.id}}));
+        return copyToUser(theme, error);
+    }
+    QFile stamp(theme.path + QLatin1Char('/') + kSystemStamp);
+    if (!stamp.open(QIODevice::ReadOnly)) {
+        return theme;
+    }
+    const QByteArray made = stamp.readAll().trimmed();
+    const QString current = systemStamp(theme.systemPath);
+    if (made == current.toUtf8()) {
+        return theme;
+    }
+    KhLog::info(kContext, QStringLiteral("the package's cursor theme changed since the user copy was made; copying it again"),
+                fields({{QStringLiteral("theme"), theme.id}, {QStringLiteral("copy_stamp"), QString::fromUtf8(made)},
+                        {QStringLiteral("package_stamp"), current}}));
+    return copyToUser(theme, error);
+}
+
 std::optional<QJsonObject> loadManifest(const QString &themePath, QString *error)
 {
-    const QString path = themePath + QStringLiteral("/keyblades/manifest.json");
+    const QString path = manifestPath(themePath);
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         *error = QStringLiteral("cannot read %1: %2").arg(path, file.errorString());
@@ -261,23 +394,37 @@ bool rewriteTheme(const Keyblades::Theme &theme, const QString &slug, QString *e
 QList<Keyblades::Theme> Keyblades::installedThemes()
 {
     QList<Theme> themes;
-    QSet<QString> seen;
-    const QStringList dirs = searchDirs();
-    for (const QString &dir : dirs) {
+    QHash<QString, qsizetype> index;
+    const auto scan = [&](const QString &dir, bool system) {
         const QDir base(dir);
         const QStringList entries = base.entryList({kThemePrefix + QLatin1Char('*')}, QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
         for (const QString &entry : entries) {
             const QString path = base.filePath(entry);
-            // The first folder holding a theme wins, as it does for the cursor loaders.
-            if (seen.contains(entry) || !QFileInfo::exists(path + QStringLiteral("/keyblades/manifest.json"))) {
+            if (!QFileInfo::exists(manifestPath(path))) {
                 continue;
             }
-            seen.insert(entry);
-            themes.append({entry, path});
+            const auto found = index.constFind(entry);
+            if (found == index.constEnd()) {
+                // The first folder holding a theme wins, as it does for the cursor loaders.
+                index.insert(entry, themes.size());
+                themes.append({entry, path, system ? path : QString()});
+            } else if (system && themes[*found].systemPath.isEmpty()) {
+                themes[*found].systemPath = path;
+            }
         }
+    };
+    for (const QString &dir : userDirs()) {
+        scan(dir, false);
     }
+    for (const QString &dir : systemDirs()) {
+        scan(dir, true);
+    }
+    const auto systemOnly = std::count_if(themes.begin(), themes.end(), [](const Theme &theme) {
+        return theme.path == theme.systemPath;
+    });
     KhLog::debug(kContext, QStringLiteral("cursor themes with keyblades found"),
-                 fields({{QStringLiteral("count"), int(themes.size())}, {QStringLiteral("searched"), QJsonArray::fromStringList(dirs)}}));
+                 fields({{QStringLiteral("count"), int(themes.size())}, {QStringLiteral("system_only"), int(systemOnly)},
+                         {QStringLiteral("searched"), QJsonArray::fromStringList(searchDirs())}}));
     return themes;
 }
 
@@ -341,13 +488,15 @@ Keyblades::Outcome Keyblades::equip(const QString &slug)
     }
     for (const Theme &theme : themes) {
         QString error;
-        if (rewriteTheme(theme, slug, &error)) {
+        const std::optional<Theme> writable = writableCopy(theme, &error);
+        if (writable && rewriteTheme(*writable, slug, &error)) {
             ++outcome.rewritten;
         } else {
             outcome.failures.append(theme.id + QStringLiteral(": ") + error);
             KhLog::error(kContext, QStringLiteral("cursor theme not rewritten"),
-                         fields({{QStringLiteral("theme"), theme.id}, {QStringLiteral("path"), theme.path},
-                                 {QStringLiteral("keyblade"), slug}, {QStringLiteral("error"), error}}));
+                         fields({{QStringLiteral("theme"), theme.id}, {QStringLiteral("path"), writable ? writable->path : theme.path},
+                                 {QStringLiteral("system_path"), theme.systemPath}, {QStringLiteral("keyblade"), slug},
+                                 {QStringLiteral("error"), error}}));
         }
     }
     if (outcome.rewritten > 0) {

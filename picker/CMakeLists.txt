@@ -19,6 +19,10 @@ find_package(KF6CoreAddons REQUIRED)
 find_package(KF6Config REQUIRED)
 find_package(Plasma REQUIRED)
 
+# Where this Qt loads plugins from, for a system-wide install to put the
+# plugin; the path differs between distributions.
+file(WRITE ${CMAKE_BINARY_DIR}/qt-plugin-dir "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}\n")
+
 add_library(khkeyblades STATIC keyblades.cpp keyblades.h khlog.cpp khlog.h)
 set_target_properties(khkeyblades PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(khkeyblades PUBLIC Qt6::Gui KF6::ConfigCore)
