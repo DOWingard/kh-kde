@@ -865,12 +865,20 @@ def cmd_status(_args) -> int:
     stale = unresolved_libraries(plugin) if plugin is not None else []
     if stale:
         log.warn("install", "the keyblade browser cannot load until it is rebuilt", missing=stale, hint=rebuild_hint())
+    active = {name: read_setting(*spec) for name, spec in SETTINGS.items()}
+    bound = active["meta_right_desktop"] == picker.PLUGIN_ID
+    if plugin is not None and not bound and is_ours(active["lookandfeel"]):
+        # Applying a Global Theme together with its desktop layout makes the
+        # shell discard its whole configuration, mouse actions included.
+        log.warn("install", "Super + right click no longer opens the keyblade browser (a desktop layout reset "
+                 "removes mouse actions)", hint=f"apply the variant again: apply {active['lookandfeel'].split('-')[-1]}")
     report = {
         "installed": {pal.key: not missing_components(pal) for pal in VARIANTS},
         "missing": {pal.key: missing_components(pal) for pal in VARIANTS},
-        "active": {name: read_setting(*spec) for name, spec in SETTINGS.items()},
+        "active": active,
         "keyblade": read_setting(KEYBLADE_RC.name, ["Keyblade"], "Current") or None,
         "keyblade_browser": plugin is not None and not stale,
+        "keyblade_browser_bound": bound,
         "keyblade_browser_missing_libraries": stale,
         "package": system_install().get("version"),
         "backup": str(BACKUP) if BACKUP.exists() else None,
