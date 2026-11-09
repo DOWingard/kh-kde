@@ -261,6 +261,8 @@ class Ink:
     select: tuple  # selection bar
     select_text: str
     select_mark: tuple | None  # bar down the selection's left side
+    select_muted: tuple  # selection in an inactive window, under normal text
+    select_muted_line: tuple
     hover_wash: tuple  # translucent hover for view and menu rows
     hover_line: tuple
     accent: str  # glyph colour for hover
@@ -287,6 +289,8 @@ def ink(pal: Palette) -> Ink:
             select=(_a(pal.select_hi), _a(mix(pal.select, pal.select_deep, 0.35))),
             select_text=pal.select_text,
             select_mark=None,
+            select_muted=(_a(WHITE, 0.17), _a(WHITE, 0.11)),
+            select_muted_line=(_a(WHITE, 0.36), _a(WHITE, 0.2)),
             hover_wash=(_a(WHITE, 0.08), _a(WHITE, 0.05)),
             hover_line=(_a(WHITE, 0.3), _a(WHITE, 0.18)),
             accent=WHITE,
@@ -310,6 +314,8 @@ def ink(pal: Palette) -> Ink:
         select=(_a(mix(pal.select, pal.select_hi, 0.3)), _a(pal.select)),
         select_text=pal.select_text,
         select_mark=_a(pal.ornament),
+        select_muted=(_a(pal.select, 0.2), _a(pal.select, 0.14)),
+        select_muted_line=(_a(pal.select, 0.5), _a(pal.select_deep, 0.4)),
         hover_wash=(_a(pal.hover, 0.16), _a(pal.hover, 0.1)),
         hover_line=(_a(pal.hover, 0.65), _a(pal.ornament_deep, 0.5)),
         accent=pal.select,
@@ -366,10 +372,21 @@ def _frames(cv: Canvas, pal: Palette, k: Ink, mt: Metrics) -> None:
     selected = FrameStyle(*k.select, line=mark, **item)
     deeper = replace(selected, fill_top=_a(mix(k.select[0][0], k.select[1][0], 0.5)))
     hover = FrameStyle(*k.hover_wash, border_top=k.hover_line[0], border_bot=k.hover_line[1], **item)
-    for element in ("itemview", "menuitem"):
-        cv.frame(f"{element}-focused", hover)
-        cv.frame(f"{element}-toggled", selected)
-        cv.frame(f"{element}-pressed", deeper)
+    cv.frame("menuitem-focused", hover)
+    cv.frame("menuitem-toggled", selected)
+    cv.frame("menuitem-pressed", deeper)
+    # Item views: Kvantum draws "pressed" for the selection in the view with
+    # keyboard focus and "toggled" for a selection elsewhere (Dolphin's Places
+    # list while files are browsed), adding "-inactive" in an inactive window.
+    # Only the focused selection gets the full bar. Elsewhere it is muted under
+    # the normal text colour, which some views use there whatever the style
+    # says (Dolphin's Places list among them); the full bar would hide it.
+    muted = FrameStyle(*k.select_muted, border_top=k.select_muted_line[0], border_bot=k.select_muted_line[1], **item)
+    cv.frame("itemview-focused", hover)
+    cv.frame("itemview-pressed", selected)
+    cv.frame("itemview-toggled", muted)
+    for state in ("toggled", "pressed"):
+        cv.frame(f"itemview-{state}-inactive", muted)
 
     # Menus and tooltips: the shell's glass, with the corner ornaments of the
     # panel popups, and the composited shadow version of the same frame.
@@ -696,7 +713,8 @@ def config_sections(pal: Palette) -> dict[str, dict[str, object]]:
         "mid.color": mix(pal.button, BLACK, 0.2),
         "shadow.color": BLACK,
         "highlight.color": pal.select,
-        "inactive.highlight.color": pal.select_deep if pal.dark else mix(pal.select, WHITE, 0.25),
+        # The muted bar of an inactive window's selection, as one opaque colour.
+        "inactive.highlight.color": mix(pal.view, WHITE, 0.15) if pal.dark else mix(pal.view, pal.select, 0.2),
         "tooltip.base.color": pal.tooltip,
         "text.color": text,
         "window.text.color": text,
@@ -704,6 +722,7 @@ def config_sections(pal: Palette) -> dict[str, dict[str, object]]:
         "disabled.text.color": pal.text_faint,
         "tooltip.text.color": text,
         "highlight.text.color": pal.select_text,
+        "inactive.highlight.text.color": text,
         "link.color": pal.link,
         "link.visited.color": pal.visited,
         "progress.indicator.text.color": pal.select_text,
@@ -781,7 +800,8 @@ def config_sections(pal: Palette) -> dict[str, dict[str, object]]:
     sections["ItemView"] = {
         "frame": "true", "frame.element": "itemview", "interior": "true", "interior.element": "itemview",
         **_frame_keys(mt.item), **_margins(1, 1, 3, 3),
-        **_text(text, text, k.select_text, k.select_text),
+        **_text(text, text, k.select_text, text),
+        "text.press.inactive.color": text, "text.toggle.inactive.color": text,
     }
     sections["Splitter"] = {"frame": "false", "interior": "false", "indicator.element": "splitter-grip",
                             "indicator.size": 16}
