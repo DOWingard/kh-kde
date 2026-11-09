@@ -1,7 +1,8 @@
 """Global Theme (look-and-feel) packages: one per variant.
 
-A package ties the variant's colour scheme, Plasma Style, window decoration,
-icons, cursors and wallpaper together, and ships the splash screen.
+A package ties the variant's colour scheme, Plasma Style, application style
+(Kvantum), window decoration, icons, cursors and wallpaper together, and ships
+the splash screen.
 
 The splash is laid out like the games' title screens: a plain ground, the
 emblem or logo, and the variant's sprite walking a line as startup progresses.
@@ -14,7 +15,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from . import log, wallpapers
+from . import kvantum, log, wallpapers
 from .colorscheme import scheme_id
 from .palette import LOGO_BLUE, Palette, mix
 from .svg import fill_template, write_text
@@ -173,7 +174,7 @@ ColorScheme={scheme_id(pal)}
 Theme={pal.theme_id}
 
 [kdeglobals][KDE]
-widgetStyle=Breeze
+widgetStyle={kvantum.style_key(pal)}
 
 [kwinrc][org.kde.kdecoration2]
 library=org.kde.kwin.aurorae

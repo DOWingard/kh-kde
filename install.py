@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install, apply, revert and remove the Kingdom Hearts Plasma themes.
 
-    ./install.py install            copy built assets from dist/ into ~/.local/share
+    ./install.py install            copy built assets from dist/ into ~/.local/share (and ~/.config/Kvantum)
     ./install.py apply OrgXIII      switch the desktop to a variant (OrgXIII | Sora)
     ./install.py revert             restore the settings saved before the first apply
     ./install.py status             show what is installed and what is active
@@ -27,7 +27,7 @@ import sys
 import time
 from pathlib import Path
 
-from khtheme import log, wallpapers
+from khtheme import kvantum, log, wallpapers
 from khtheme.colorscheme import scheme_id
 from khtheme.palette import ORG_XIII, SORA, VARIANTS, Palette
 from khtheme.sounds import THEME_ID as SOUND_THEME
@@ -61,6 +61,8 @@ TREES = {
     "konsole": DATA / "konsole",
     "sounds": DATA / "sounds",
     "fonts": DATA / "fonts",
+    # Kvantum reads user themes from the config directory, not the data one.
+    "Kvantum": CONFIG / "Kvantum",
 }
 # Seconds given to KWin or the shell to let go of what it showed before, when
 # something is switched away and back to make a rebuilt version load.
@@ -84,6 +86,7 @@ SETTINGS = {
     "decoration_theme": ("kwinrc", ["org.kde.kdecoration2"], "theme"),
     "cursor": ("kcminputrc", ["Mouse"], "cursorTheme"),
     "sounds": ("kdeglobals", ["Sounds"], "Theme"),
+    "kvantum_theme": ("Kvantum/kvantum.kvconfig", ["General"], "theme"),
     "splash": ("ksplashrc", ["KSplash"], "Theme"),
     "splash_engine": ("ksplashrc", ["KSplash"], "Engine"),
     "light_lookandfeel": ("kdeglobals", ["KDE"], "DefaultLightLookAndFeel"),
@@ -158,6 +161,12 @@ def is_ours(name: str) -> bool:
     return name.startswith(OWN_PREFIXES)
 
 
+def is_user_copy(name: str) -> bool:
+    """Kvantum Manager saves a user's edits of a theme as "<Name>#"; those are
+    the user's, not ours, and survive installs and uninstalls."""
+    return name.endswith("#")
+
+
 def points_at_ours(value: str) -> bool:
     """True for a setting value (an id or a path) that refers to one of our themes."""
     return any(prefix.lower() in value.lower() for prefix in OWN_PREFIXES)
@@ -202,7 +211,7 @@ def cmd_install(_args) -> int:
         # Entries of ours that the current build no longer produces (renamed or
         # dropped since an earlier install) would linger in the choosers.
         for entry in sorted(target.iterdir()):
-            if is_ours(entry.name) and entry.name not in wanted:
+            if is_ours(entry.name) and entry.name not in wanted and not is_user_copy(entry.name):
                 try:
                     remove_entry(entry)
                     pruned += 1
@@ -276,7 +285,7 @@ def cmd_uninstall(_args) -> int:
         if not target.is_dir():
             continue
         for entry in target.iterdir():
-            if is_ours(entry.name):
+            if is_ours(entry.name) and not is_user_copy(entry.name):
                 try:
                     remove_entry(entry)
                     removed += 1
@@ -377,6 +386,7 @@ def missing_components(pal: Palette) -> list[str]:
         "cursors": TREES["cursors"] / pal.cursor_id / "cursors" / "default",
         "wallpaper": DATA / "wallpapers" / PREFIX / "metadata.json",
         "sound theme": DATA / "sounds" / SOUND_THEME / "index.theme",
+        "kvantum style": TREES["Kvantum"] / kvantum.THEME / f"{kvantum.theme_name(pal)}.kvconfig",
     }
     return [name for name, path in expected.items() if not path.exists()]
 
@@ -459,6 +469,13 @@ def reload_decoration(pal: Palette) -> None:
     log.info("install", "window decoration reloaded", decoration=pal.decoration_id)
 
 
+def notify_style_change() -> None:
+    """Make running KDE applications rebuild their widget style, which also
+    rereads a rebuilt Kvantum theme."""
+    run(["dbus-send", "--session", "--type=signal", "/KGlobalSettings", "org.kde.KGlobalSettings.notifyChange",
+         "int32:2", "int32:0"], "notify applications of the widget style", check=False)
+
+
 def cmd_apply(args) -> int:
     pal = variant(args.variant)
     missing = missing_components(pal)
@@ -473,7 +490,16 @@ def cmd_apply(args) -> int:
         write_setting(*SETTINGS["accent"], None)
         log.info("install", "removed custom accent colour so the variant's own colours apply")
 
+    # The global theme picks the Kvantum style key (kvantum / kvantum-dark);
+    # which Kvantum theme that loads is Kvantum's own setting.
+    write_setting(*SETTINGS["kvantum_theme"], kvantum.THEME)
     run(["plasma-apply-lookandfeel", "--keep-auto", "-a", pal.theme_id], "apply global theme", timeout=120)
+    if shutil.which("kvantummanager") is None:
+        # Without the engine the style key names nothing and Qt would fall back
+        # to Fusion; Breeze at least follows the colour scheme.
+        write_setting(*SETTINGS["widgetstyle"], "Breeze")
+        log.warn("install", "Kvantum is not installed; application widgets use Breeze instead",
+                 hint="install the kvantum package and apply again")
     # Re-applying the scheme makes sure colours are regenerated without the accent.
     run(["plasma-apply-colorscheme", scheme_id(pal)], "apply colour scheme", check=False)
 
@@ -502,6 +528,7 @@ def cmd_apply(args) -> int:
 
     reload_cursors(pal)
     reload_decoration(pal)
+    notify_style_change()
     log.info("install", "variant applied", variant=pal.key, theme=pal.theme_id)
     return 0
 
@@ -540,7 +567,8 @@ def cmd_revert(_args) -> int:
         step("cursors", lambda: run(["plasma-apply-cursortheme", saved["cursor"]], "restore cursor theme"))
     if saved.get("icons"):
         step("icons", lambda: run(["/usr/lib/plasma-changeicons", saved["icons"]], "restore icon theme"))
-    for name in ("decoration_library", "decoration_theme", "widgetstyle", "splash", "splash_engine", "sounds",
+    for name in ("decoration_library", "decoration_theme", "widgetstyle", "kvantum_theme", "splash",
+                 "splash_engine", "sounds",
                  "light_lookandfeel", "dark_lookandfeel", "lock_plugin", "lock_image", "lock_preview"):
         file, groups, key = SETTINGS[name]
         step(name, lambda f=file, g=groups, k=key, v=saved.get(name): write_setting(f, g, k, v))
@@ -562,9 +590,7 @@ def cmd_revert(_args) -> int:
         step("konsole", lambda: set_konsole_scheme(None, saved=data["konsole"]))
 
     step("window manager", lambda: run(["qdbus6", "org.kde.KWin", "/KWin", "reconfigure"], "reload window manager"))
-    # Tell running applications that the widget style changed.
-    run(["dbus-send", "--session", "--type=signal", "/KGlobalSettings", "org.kde.KGlobalSettings.notifyChange",
-         "int32:2", "int32:0"], "notify applications", check=False)
+    notify_style_change()
 
     if failures:
         log.error("install", "revert finished with failed steps; backup kept", failed=failures, backup=str(BACKUP))
