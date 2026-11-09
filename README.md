@@ -315,23 +315,57 @@ buttons; neither may be drawn on its single desktop, and "on all desktops" has
 to appear once a second desktop is added. It needs `kwin_wayland`,
 `dbus-run-session`, `qdbus6` and `spectacle`.
 
-## Releasing
+## Continuous integration
 
-The version is `VERSION` in `khtheme/__init__.py`. With the change committed
-and the GitHub repository as the `origin` remote:
+Every push to GitHub, on any branch, and every pull request runs `tools/ci.sh`
+in a clean `archlinux:base-devel` container. It:
+
+1. installs the packages the PKGBUILD declares, plus what the checks need
+   (PyQt6, Kvantum, Spectacle, a font), so a dependency missing from the
+   PKGBUILD fails CI before it fails for an AUR user;
+2. builds both variants from scratch;
+3. runs `tests/`: keyblades on system-wide cursor themes, the staged package
+   and the tool working against it, lookup order, the soname-bump report;
+4. renders the previews offscreen and runs the decoration under a headless
+   KWin (the two tools under *Looking before applying*);
+5. builds the AUR package with `makepkg` from a fresh source bundle.
+
+The renders and the release files are kept as artifacts of each run.
+
+`main` accepts only commits whose "build and test" check has passed, so a plain
+`git push origin main` of an untested commit is refused. Land work with:
 
 ```sh
-./tools/release.py --test-build
+./tools/land.py
 ```
 
-This writes the source bundle (`git archive` of HEAD) and its checksum to
-`dist/release/`, fills in `packaging/aur/PKGBUILD.in` into
-`dist/release/aur/` together with `.SRCINFO`, builds the package with `makepkg`
-from the local bundle to prove the PKGBUILD works, and prints the commands that
-publish the release. It runs none of them. The PKGBUILD downloads the bundle
-from the GitHub release tagged `v<version>`, so attach the bundle to that
-release before pushing the AUR files. For a packaging-only fix, run it with
-`--pkgrel 2` (and so on) at the same version.
+It pushes HEAD to a temporary branch, waits for CI, and moves `main` to it only
+if every check passed. Pull requests work too. To run the same checks before
+pushing (needs Docker; tests the committed HEAD):
+
+```sh
+./tools/ci-local.sh
+```
+
+## Releasing
+
+Raise `VERSION` in `khtheme/__init__.py`, land that commit, then tag it:
+
+```sh
+git tag -a v2.1.0 -m "kingdom-hearts-plasma 2.1.0"
+git push origin v2.1.0
+```
+
+CI runs every check on the tag, then publishes the GitHub release: the source
+bundle, its checksum, and `aur-files.tar.gz` (PKGBUILD, `.SRCINFO` and install
+script, carrying that bundle's checksum). When the repository secret
+`AUR_SSH_PRIVATE_KEY` holds the SSH key of an AUR account that maintains the
+package, CI pushes those files to the AUR as well; without it, push them by hand
+(`./tools/release.py` prints the commands). For a packaging-only fix, take the
+AUR files from the release, raise `pkgrel`, regenerate `.SRCINFO` with
+`makepkg --printsrcinfo` and push.
+
+`./tools/release.py --test-build` makes the same bundle and package locally.
 
 ## Layout
 
@@ -360,7 +394,12 @@ khtheme/
   log.py              structured logging
 picker/               keyblade menu: Plasma mouse-action plugin, kh-keyblade, preview host
 packaging/aur/        PKGBUILD template and install messages for the AUR package
+tests/                unit and integration tests (python3 -m unittest discover -s tests)
+.github/workflows/    CI: every check on each push, releases from tags
 tools/
+  ci.sh               every check, in a clean Arch system (what CI runs)
+  ci-local.sh         ci.sh in Docker on the committed HEAD
+  land.py             push HEAD through CI onto main
   release.py          source bundle and AUR package files for a release
   preview.py          offscreen renders of the built theme
   cursorsheet.py      contact sheet of a built cursor theme
