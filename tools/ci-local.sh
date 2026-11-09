@@ -23,7 +23,7 @@ start=$SECONDS
 docker run --rm -e KH_REPO_URL="${KH_REPO_URL:-$url}" -v "$ROOT:/src:ro" "$IMAGE" bash -c '
   set -euo pipefail
   pacman -Syu --noconfirm --needed --noprogressbar git python >/dev/null
-  git config --global --add safe.directory /src
+  git config --global --add safe.directory "*"
   git clone --quiet /src /work
   exec /work/tools/ci.sh'
 log info "local CI run passed in $((SECONDS - start))s"
