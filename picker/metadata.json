@@ -1,0 +1,10 @@
+{
+    "KPlugin": {
+        "Description": "Choose the keyblade the Kingdom Hearts cursors point with",
+        "EnabledByDefault": true,
+        "Icon": "preferences-desktop-cursors",
+        "Id": "kingdomhearts_keyblades",
+        "Name": "Keyblade Browser"
+    },
+    "X-Plasma-HasConfigurationInterface": false
+}

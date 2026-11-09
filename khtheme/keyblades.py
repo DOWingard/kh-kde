@@ -55,6 +55,10 @@ KEYBLADES = [
     Keyblade("ultima-weapon", "Ultima Weapon", SHEET, (39, 245, 27, 25)),
 ]
 
+# The keyblade menu treats the first entry as the one in use when no choice
+# has been recorded.
+assert KEYBLADES[0].slug == MAIN, "the main keyblade must come first"
+
 # The shared canvas: the largest sprite fits exactly.
 CANVAS = (max(k.box[2] for k in KEYBLADES), max(k.box[3] for k in KEYBLADES))
 
