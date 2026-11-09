@@ -34,7 +34,7 @@ For each variant:
   as pointer, the menu glove on links, a walking Sora or Roxas while busy
 - **Icon theme**: heart-and-crown or Nobody sigil as the application launcher,
   on top of Breeze
-- **Wallpapers**: three or four pictures per variant
+- **Wallpapers**: four to six pictures per variant
 - **Konsole colour scheme**
 
 Shared by both: a wallpaper package that swaps its picture with the colour
@@ -87,8 +87,10 @@ Global Theme) moves between the two. The wallpaper and lock screen follow.
 ### Wallpapers
 
 All pictures appear in the wallpaper chooser as "Kingdom Hearts — …". The
-package named plain "Kingdom Hearts" is the one `apply` sets: it shows
-Destiny Islands in light mode and Roxas in the black coat in dark mode.
+package named plain "Kingdom Hearts" is the one `apply` sets: it shows Sora,
+Donald and Goofy in light mode and the Dive to the Heart picture in dark mode.
+The picture each variant starts with is the entry marked `default=True` in
+`khtheme/wallpapers.py`.
 
 ### Sounds
 
@@ -112,7 +114,10 @@ commands with:
 ```
 
 The variant is chosen in `theme.conf` inside the installed theme
-(`variant=OrgXIII` or `variant=Sora`).
+(`variant=OrgXIII` or `variant=Sora`). The login screen is fitted to each
+variant's default picture at build time: the clock and login card stand over
+the calmest of the left, middle and right thirds, and the text turns light when
+the picture is dark, whichever variant it belongs to.
 
 ### Terminal
 
@@ -175,8 +180,11 @@ that, run the decoration under a private, headless KWin:
 ```
 
 It starts KWin on its own D-Bus session with a throw-away configuration, opens
-two test windows and saves that virtual screen. It needs `kwin_wayland`,
-`dbus-run-session` and `spectacle`.
+three test windows (one maximised) and saves that virtual screen. Each window
+also reports the title-bar rectangle KWin holds for it, and the check fails if
+any part of the top bar away from the window edge would resize the window
+instead of moving it. It needs `kwin_wayland`, `dbus-run-session` and
+`spectacle`.
 
 ## Layout
 
