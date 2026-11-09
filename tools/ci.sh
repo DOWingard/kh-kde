@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
-# Every check this project has, run in a clean Arch Linux system:
+# Every check CI runs, in a clean Arch Linux system:
 #   build both variants -> unit and integration tests -> offscreen renders ->
-#   the decoration under a headless KWin -> the AUR package built by makepkg.
+#   the AUR package built by makepkg -> that package installed with pacman and
+#   checked as a user would have it.
 #
 # CI runs this as root in an archlinux:base-devel container. The root part
 # installs the packages the PKGBUILD declares plus what the checks need, so a
-# dependency missing from the PKGBUILD fails here as it would for an AUR user.
-# The rest runs unprivileged, as makepkg requires. tools/ci-local.sh runs the
-# same thing in Docker on your own machine.
+# dependency missing from the PKGBUILD fails here as it would for an AUR user,
+# and later installs the built package. The rest runs unprivileged, as makepkg
+# requires. tools/ci-local.sh runs the same thing in Docker on your own machine.
+#
+# The checks that need a GPU (tools/nestedkwin.py, tools/nestedplasma.py) are
+# not run here: CI machines have none, and KWin cannot run without one.
 set -Eeuo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILDER=builder
 # Needed by the checks, not by the package itself.
-CHECK_DEPS=(git python-pyqt6 kvantum spectacle ttf-dejavu)
+CHECK_DEPS=(git python-pyqt6 kvantum ttf-dejavu)
+PACKAGES="$ROOT/dist/release/test-build"
 
 json_escape() {
   local s=${1//\\/\\\\}
@@ -61,27 +66,29 @@ install_deps() {
   pacman -Syu --noconfirm --needed --noprogressbar "${deps[@]}" "${CHECK_DEPS[@]}"
 }
 
-drop_kwin_capability() {
-  # kwin_wayland carries CAP_SYS_NICE as a file capability, and a container
-  # without that capability cannot exec it at all (EPERM). KWin runs without
-  # it, only without realtime scheduling, so this throwaway system drops it.
-  local kwin
-  kwin=$(command -v kwin_wayland) || { log warn "kwin_wayland not installed"; return 0; }
-  if [[ -n $(getcap "$kwin") ]]; then
-    setcap -r "$kwin"
-    log info "file capability dropped so a container can run it" binary="$kwin"
+install_package() {
+  local packages
+  # makepkg may also write a -debug package; only the package itself is installed.
+  mapfile -t packages < <(find "$PACKAGES" -maxdepth 1 -name 'kingdom-hearts-plasma-[0-9]*.pkg.tar.*' ! -name '*.sig')
+  if ((${#packages[@]} != 1)); then
+    log error "expected exactly one built package" folder="$PACKAGES" found="${packages[*]}"
+    return 1
   fi
+  log info "installing the built package" package="${packages[0]##*/}"
+  pacman -U --noconfirm --noprogressbar "${packages[0]}"
 }
 
 as_root() {
   step "install dependencies" install_deps
-  drop_kwin_capability
   if ! id -u "$BUILDER" &>/dev/null; then
     useradd --create-home "$BUILDER"
     log info "unprivileged user created" user="$BUILDER"
   fi
   chown -R "$BUILDER:" "$ROOT"
-  exec runuser -u "$BUILDER" -- bash "$ROOT/tools/ci.sh" --unprivileged
+  runuser -u "$BUILDER" -- bash "$ROOT/tools/ci.sh" --build
+  step "install the package" install_package
+  runuser -u "$BUILDER" -- bash "$ROOT/tools/ci.sh" --installed
+  log info "all checks passed" commit="$(git -C "$ROOT" rev-parse --short HEAD)"
 }
 
 release_args() {
@@ -104,29 +111,38 @@ release_args() {
   fi
 }
 
-as_builder() {
+builder_env() {
   cd "$ROOT"
-  git config --global --add safe.directory '*'
-  git config --global user.name >/dev/null || git config --global user.name "CI"
-  git config --global user.email >/dev/null || git config --global user.email "ci@localhost"
-  # A container has no login session; Qt and KWin need a private runtime folder.
+  # A container has no login session; Qt needs a private runtime folder.
   XDG_RUNTIME_DIR=$(mktemp -d)
   export XDG_RUNTIME_DIR
   chmod 700 "$XDG_RUNTIME_DIR"
+}
+
+build_and_test() {
+  builder_env
+  git config --global --add safe.directory '*'
+  git config --global user.name >/dev/null || git config --global user.name "CI"
+  git config --global user.email >/dev/null || git config --global user.email "ci@localhost"
   release_args
 
   step "byte-compile the Python" python3 -m compileall -q build.py install.py khtheme tools tests
   step "build both variants" ./build.py --clean
   step "unit and integration tests" python3 -m unittest discover -s tests -v
   step "offscreen renders" ./tools/preview.py
-  step "decoration under a headless KWin" ./tools/nestedkwin.py
   step "AUR package" ./tools/release.py "${RELEASE_ARGS[@]}"
-  log info "all checks passed" commit="$(git rev-parse --short HEAD)"
 }
 
-log info "ci started" root="$ROOT" user="$(id -un)"
-if [[ ${1:-} == --unprivileged ]]; then
-  as_builder
+check_installed() {
+  builder_env
+  step "installed package" python3 -m unittest discover -s tests -p installed_package.py -v
+}
+
+log info "ci started" root="$ROOT" user="$(id -un)" phase="${1:-root}"
+if [[ ${1:-} == --build ]]; then
+  build_and_test
+elif [[ ${1:-} == --installed ]]; then
+  check_installed
 elif ((EUID == 0)); then
   as_root
 else
