@@ -55,6 +55,9 @@ same meaning, the menu and title **fonts**, and an **SDDM login theme**.
   falls back to Breeze in the theme's colours
 - Python 3.10+
 - Build tools: `rsvg-convert` (librsvg), `magick` (ImageMagick 7), `ffmpeg`
+- For the keyblade menu: `cmake` and a C++20 compiler, with the Qt 6, KDE
+  Frameworks (KConfig, KCoreAddons) and Plasma (libplasma) development files.
+  On Arch Linux these come with the regular packages
 - PyQt6, only for `tools/preview.py`
 
 ## Quick start
@@ -143,6 +146,40 @@ event for hovering or clicking ordinary menu entries, so the cursor and confirm
 sounds are heard where the desktop does raise an event (volume steps, text
 completion) and in applications that play input-feedback sounds from the theme.
 
+### Keyblades
+
+The pointer can be any of the 18 keyblades of *Chain of Memories*. Hold
+<kbd>Super</kbd> and right-click an empty spot of the desktop: a menu shows
+them all, names the one under the mouse, and marks the one in use. Click one
+and it becomes the pointer, in both variants. The pointer shows the Breeze
+cursor for about a second while the window manager reloads it. Applications
+that draw their own cursor (some X11 and GTK programs) show the new keyblade
+once they are restarted. "Cursor Settings…" in the same menu opens the cursor
+page of System Settings.
+
+From a terminal:
+
+```sh
+./install.py keyblade             # list the keyblades (JSON)
+./install.py keyblade oathkeeper  # point with one
+```
+
+The choice is kept in `~/.config/kingdom-hearts-plasmarc`, and `install`
+puts it back after replacing the cursor themes.
+
+To make <kbd>Super</kbd> + right-click reach the desktop, `apply` changes
+what KWin does with it. KWin's default for <kbd>Super</kbd> + right-drag is
+resizing a window, and it keeps the click from the desktop. While a variant is
+applied, that combination activates the window under the mouse and passes the
+click on instead, so **Super + right-drag no longer resizes windows**
+(<kbd>Super</kbd> + left-drag still moves them). `revert` restores KWin's
+setting. To use another button for the menu, pick "Keyblade Browser" for it
+under Desktop and Wallpaper → Mouse Actions (right-click the desktop →
+Desktop and Wallpaper). The menu plugin is loaded by the Plasma shell from
+`~/.local/share/kingdom-hearts-plasma/plugins`, which a login script in
+`~/.config/plasma-workspace/env/` puts on `QT_PLUGIN_PATH`; `apply` restarts
+the shell once so the running session finds it.
+
 ### Fonts
 
 KHMenu, KHGummi and KHTitle are installed as user fonts. The decoration,
@@ -204,7 +241,7 @@ Useful build options:
 
 ```sh
 ./tools/preview.py                    # renders to CONTEXT/tmp/previews/
-./tools/preview.py --only decoration  # plasmastyle | decoration | splash | sddm | cursors | widgets
+./tools/preview.py --only decoration  # plasmastyle | decoration | splash | sddm | cursors | widgets | keyblades
 ```
 
 Nothing here touches the running desktop:
@@ -216,7 +253,10 @@ Nothing here touches the running desktop:
 - the cursor sheet is read back from the packed cursor files, with hotspots
   marked, on both a light and a dark surface;
 - the widget gallery is drawn by the real Kvantum engine with the built theme
-  and colour scheme, with a menu beside it.
+  and colour scheme, with a menu beside it;
+- the keyblade menu is the built plugin, loaded by its id from a plugin
+  folder the way the Plasma shell loads it, in a menu set up like the
+  desktop's, drawn with Kvantum.
 
 The Kvantum build also checks its own SVG: every element the config makes
 Kvantum ask for must be drawn, because a missing one would be filled in from
@@ -255,12 +295,15 @@ khtheme/
   wallpapers.py       wallpaper packages
   icons.py            launcher emblem icon theme
   cursors.py          cursor composition and Xcursor writer
+  keyblades.py        the pointer keyblades: names and where each sits on its sprite sheet
+  picker.py           builds the keyblade menu (C++) with CMake
   sounds.py           sound theme
   fonts.py            font staging
   konsole.py          terminal colours
   lookandfeel.py      Global Theme packages and splash
   sddm.py             login theme
   log.py              structured logging
+picker/               keyblade menu: Plasma mouse-action plugin, kh-keyblade, preview host
 tools/
   preview.py          offscreen renders of the built theme
   cursorsheet.py      contact sheet of a built cursor theme
@@ -274,7 +317,9 @@ dist/                 build output (generated)
 The tools write one JSON object per line to stderr with `timestamp`, `level`,
 `context`, `message`, a `run_id` shared by all records of one invocation, and
 `error` / `stack` on failures. Set `KH_LOG_LEVEL=debug` for per-file detail.
-`install.py status` prints its report to stdout.
+`install.py status` prints its report to stdout. The keyblade menu logs the
+same way from inside the Plasma shell, so its records are in the shell's
+journal: `journalctl --user -u plasma-plasmashell`.
 
 ## Notes
 
