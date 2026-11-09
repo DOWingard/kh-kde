@@ -2,7 +2,7 @@
 """Make a release: the source bundle, and the AUR package files that build it.
 
     tools/release.py                    needs a clean tree and a GitHub 'origin' remote
-    tools/release.py --url https://github.com/OWNER/kingdom-hearts-plasma
+    tools/release.py --url https://github.com/OWNER/REPO
     tools/release.py --test-build       also build the package locally with makepkg
 
 Writes into dist/release/:
@@ -11,9 +11,9 @@ Writes into dist/release/:
     kingdom-hearts-plasma-VERSION.tar.gz.sha256
     aur/PKGBUILD, aur/.SRCINFO, aur/kingdom-hearts-plasma.install
 
-then prints the commands that publish them. Nothing is uploaded or pushed
-here. The version is khtheme.VERSION; the PKGBUILD downloads the bundle from
-the GitHub release tagged vVERSION, so the bundle must be attached to it.
+then prints how a release is published: by CI, from the version's tag.
+Nothing is uploaded or pushed here. The version is khtheme.VERSION; the
+PKGBUILD downloads the bundle from the GitHub release tagged vVERSION.
 """
 
 from __future__ import annotations
@@ -159,20 +159,23 @@ def test_build(aur: Path, bundle: Path) -> None:
     log.info("release", "test build finished", packages=packages, duration_s=round(time.monotonic() - start))
 
 
-def next_steps(commit: str, bundle: Path, aur: Path) -> str:
+def next_steps(commit: str) -> str:
     tag = f"v{VERSION}"
-    rel = bundle.relative_to(ROOT)
-    return f"""# 1. Tag the bundled commit and publish the bundle as a GitHub release:
+    clone = f"../aur-{NAME}"
+    return f"""# CI publishes from the tag, with a bundle and AUR files it builds and tests itself.
+# 1. Land the release commit (CI must pass first), then tag it:
+./tools/land.py
 git tag -a {tag} -m "{NAME} {VERSION}" {commit[:12]}
-git push origin HEAD {tag}
-gh release create {tag} {rel} --verify-tag --title "{VERSION}" --notes "Source bundle: ./build.py && ./install.py install && ./install.py apply Sora"
+git push origin {tag}
 
-# 2. Publish the AUR package (first time: clone the empty AUR repository):
-git clone ssh://aur@aur.archlinux.org/{NAME}.git ../aur-{NAME}
-cp {aur.relative_to(ROOT)}/PKGBUILD {aur.relative_to(ROOT)}/.SRCINFO {aur.relative_to(ROOT)}/{NAME}.install ../aur-{NAME}/
-git -C ../aur-{NAME} add PKGBUILD .SRCINFO {NAME}.install
-git -C ../aur-{NAME} commit -m "Update to {VERSION}"
-git -C ../aur-{NAME} push
+# 2. CI tests the tag, publishes the GitHub release (bundle, checksum and
+#    aur-files.tar.gz) and, when the AUR_SSH_PRIVATE_KEY secret is set, pushes
+#    the AUR package. Without that secret, push the release's AUR files by hand
+#    (first time: git clone ssh://aur@aur.archlinux.org/{NAME}.git {clone}):
+gh release download {tag} -p aur-files.tar.gz -O - | tar -xz -C {clone}
+git -C {clone} add PKGBUILD .SRCINFO {NAME}.install
+git -C {clone} commit -m "Update to {VERSION}"
+git -C {clone} push
 """
 
 
@@ -199,7 +202,7 @@ def main() -> int:
     except Exception as exc:
         log.error("release", "unexpected failure", error=exc, version=VERSION)
         return 1
-    print(next_steps(commit, bundle, aur))
+    print(next_steps(commit))
     log.info("release", "release files ready", version=VERSION, url=url)
     return 0
 

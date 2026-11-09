@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    # The default branch's ruleset requires this check by name.
+    name: build and test
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 45
+    steps:
+      - name: Install git and Python
+        run: pacman -Syu --noconfirm --needed --noprogressbar git python
+
+      - uses: actions/checkout@v4
+
+      - name: Run every check
+        run: tools/ci.sh
+
+      - name: Keep the renders
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: previews
+          path: CONTEXT/tmp/previews
+          if-no-files-found: ignore
+
+      - name: Keep the release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: |
+            dist/release/*.tar.gz
+            dist/release/*.sha256
+            dist/release/aur/
+          include-hidden-files: true
+
+  release:
+    name: publish the GitHub release
+    needs: checks
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The PKGBUILD's checksum is of this bundle, so the AUR files ship with it.
+          tar -czf release/aur-files.tar.gz -C release/aur PKGBUILD .SRCINFO kingdom-hearts-plasma.install
+          gh release create "$GITHUB_REF_NAME" release/*.tar.gz release/*.sha256 \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "${GITHUB_REF_NAME#v}" \
+            --notes "Source bundle: unpack, then \`./build.py && ./install.py install && ./install.py apply Sora\` (or \`OrgXIII\`). Arch Linux: \`yay -S kingdom-hearts-plasma\`. \`aur-files.tar.gz\` holds the AUR package files for this bundle."
+
+  aur:
+    name: publish the AUR package
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      # Runs only once the secret holding the AUR account's SSH key is set.
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+    steps:
+      - name: Skip without an AUR key
+        if: env.AUR_SSH_PRIVATE_KEY == ''
+        run: echo "::notice::AUR_SSH_PRIVATE_KEY is not set; push the AUR files from the release by hand."
+
+      - uses: actions/download-artifact@v4
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        with:
+          name: release
+          path: release
+
+      - name: Push to the AUR
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        run: |
+          set -euo pipefail
+          install -dm700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+          git clone ssh://aur@aur.archlinux.org/kingdom-hearts-plasma.git aur
+          cp release/aur/PKGBUILD release/aur/.SRCINFO release/aur/kingdom-hearts-plasma.install aur/
+          cd aur
+          git config user.name "${{ github.actor }}"
+          git config user.email "${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO kingdom-hearts-plasma.install
+          if git diff --cached --quiet; then
+            echo "::notice::The AUR package already has these files."
+            exit 0
+          fi
+          git commit -m "Update to ${GITHUB_REF_NAME#v}"
+          git push origin HEAD:master
