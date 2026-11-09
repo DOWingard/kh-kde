@@ -84,14 +84,17 @@ def maintainer() -> str:
     return f"{name} <{email}>"
 
 
-def check_tree() -> str:
+def check_tree(tag_check: bool = True) -> str:
     """HEAD's commit, refusing uncommitted changes: the bundle is HEAD, and
-    unbundled edits would make it differ from what was tested."""
+    unbundled edits would make it differ from what was tested. Unless told
+    otherwise, also refuses a version whose tag already names another commit."""
     dirty = run(["git", "status", "--porcelain", "--untracked-files=no"], "check for uncommitted changes").strip()
     if dirty:
         log.error("release", "uncommitted changes; commit them first", changes=dirty.splitlines()[:20])
         raise ReleaseError("the working tree has uncommitted changes")
     commit = run(["git", "rev-parse", "HEAD"], "read HEAD").strip()
+    if not tag_check:
+        return commit
     tag = f"v{VERSION}"
     tagged = subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}^{{commit}}"], cwd=ROOT,
                             capture_output=True, text=True).stdout.strip()
@@ -178,12 +181,14 @@ def main() -> int:
     parser.add_argument("--url", help="GitHub repository URL, when 'origin' is not set or not the one to publish to")
     parser.add_argument("--pkgrel", type=int, default=1, help="package release; raise it for packaging-only fixes")
     parser.add_argument("--test-build", action="store_true", help="also build the package locally with makepkg")
+    parser.add_argument("--no-tag-check", action="store_true",
+                        help="package HEAD even when the version's tag names an earlier commit (CI on later commits)")
     args = parser.parse_args()
 
     log.info("release", "release started", version=VERSION)
     try:
         url = project_url(args.url)
-        commit = check_tree()
+        commit = check_tree(tag_check=not args.no_tag_check)
         bundle, digest = make_bundle(commit)
         aur = render_aur(url, digest, args.pkgrel)
         if args.test_build:
