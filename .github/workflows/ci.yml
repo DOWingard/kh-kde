@@ -30,15 +30,8 @@ jobs:
       - name: Run every check
         run: tools/ci.sh
 
-      - name: Keep the renders
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: previews
-          path: CONTEXT/tmp/previews
-          if-no-files-found: ignore
-
       - name: Keep the release files
+        if: github.ref_type == 'tag'
         uses: actions/upload-artifact@v4
         with:
           name: release
