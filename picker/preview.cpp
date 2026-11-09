@@ -62,6 +62,8 @@ int main(int argc, char **argv)
     int code = 1;
     QTimer::singleShot(800, &app, [&] {
         QJsonObject summary;
+        // Which copy of the plugin the loader found, for checks of an installed package.
+        summary[QStringLiteral("plugin")] = plugin->metadata().fileName();
         summary[QStringLiteral("entries")] = int(menu.actions().size());
         QJsonArray buttons;
         QToolButton *hovered = nullptr;
