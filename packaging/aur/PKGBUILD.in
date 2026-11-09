@@ -19,7 +19,7 @@ depends=(
   'qt6-base'
   'qt6-tools'
 )
-makedepends=('cmake' 'ffmpeg' 'imagemagick' 'librsvg')
+makedepends=('cmake' 'extra-cmake-modules' 'ffmpeg' 'imagemagick' 'librsvg')
 optdepends=(
   'kvantum: application style (Breeze in the theme colours without it)'
   'konsole: terminal colour schemes'
