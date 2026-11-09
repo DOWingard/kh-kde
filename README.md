@@ -214,6 +214,12 @@ Desktop and Wallpaper). The menu plugin is loaded by the Plasma shell from
 the shell once so the running session finds it. The AUR package puts the plugin
 in Qt's own plugin folder instead, where the shell finds it without the script.
 
+Applying a Global Theme together with its desktop layout (Breeze's, for
+example) makes the shell discard its whole configuration and rebuild the
+default desktop, mouse actions included, so the binding is gone afterwards.
+`status` reports this as `"keyblade_browser_bound": false`; run `apply` again
+to restore it.
+
 ### Fonts
 
 KHMenu, KHGummi and KHTitle are installed as user fonts. The decoration,
