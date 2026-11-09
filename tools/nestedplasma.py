@@ -135,6 +135,7 @@ KH_LOG_LEVEL=debug plasmashell --no-respawn >"$W/shell-login.log" 2>&1 &
 shell=$!
 wait_shell; echo $? >"$W/shell-login.status"
 command -v dolphin >/dev/null && dolphin "$HOME" >"$W/dolphin.log" 2>&1 &
+sleep 2
 command -v konsole >/dev/null && konsole >"$W/konsole.log" 2>&1 &
 sleep 8
 spectacle -b -n -f -o "$W/desktop.png" >"$W/spectacle.log" 2>&1
@@ -235,22 +236,40 @@ def plugin_loaded(shell_log: str) -> bool:
     return False
 
 
+def search_path(name: str, default: str, first: Path | None = None) -> str:
+    """An XDG search path without the folders under the real home (the
+    running desktop's own settings and data), optionally with `first` ahead."""
+    real_home = str(Path.home())
+    kept = [p for p in (os.environ.get(name) or default).split(":")
+            if p and p != real_home and not p.startswith(real_home + "/")]
+    return ":".join(([str(first)] if first else []) + kept)
+
+
 def private_env(work: Path) -> dict[str, str]:
     """An environment that leads nowhere outside the work folder."""
     home = work / "home"
     runtime = work / "runtime"
     runtime.mkdir(mode=0o700)
-    drop = ("WAYLAND_DISPLAY", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "SESSION_MANAGER", "QT_PLUGIN_PATH",
-            "KH_CURSOR_DIRS", "XDG_SESSION_ID", "XDG_SEAT", "XDG_VTNR")
-    env = {k: v for k, v in os.environ.items() if k not in drop}
+    drop = {"WAYLAND_DISPLAY", "DISPLAY", "DBUS_SESSION_BUS_ADDRESS", "SESSION_MANAGER", "QT_PLUGIN_PATH",
+            "KH_CURSOR_DIRS", "XDG_SESSION_ID", "XDG_SEAT", "XDG_VTNR", "QT_WAYLAND_RECONNECT"}
+    # KDE_* describe the running desktop's session, not this one.
+    env = {k: v for k, v in os.environ.items() if k not in drop and not k.startswith("KDE_")}
     env.update(
         HOME=str(home),
         XDG_CONFIG_HOME=str(home / ".config"),
         XDG_DATA_HOME=str(home / ".local" / "share"),
         XDG_STATE_HOME=str(home / ".local" / "state"),
         XDG_CACHE_HOME=str(home / ".cache"),
+        # A Global Theme writes its defaults to kdedefaults, which a Plasma
+        # login puts first on the config search path. The running desktop's
+        # own kdedefaults would otherwise fill in every setting left unset here.
+        XDG_CONFIG_DIRS=search_path("XDG_CONFIG_DIRS", "/etc/xdg", home / ".config" / "kdedefaults"),
+        XDG_DATA_DIRS=search_path("XDG_DATA_DIRS", "/usr/local/share:/usr/share"),
         # Also keeps `systemctl --user` from reaching the real session.
         XDG_RUNTIME_DIR=str(runtime),
+        # No system bus either: the machine's disks, network and power state
+        # would show in the shell and in Dolphin, and in the screenshot.
+        DBUS_SYSTEM_BUS_ADDRESS=f"unix:path={runtime / 'no-system-bus'}",
         KWIN_WAYLAND_NO_PERMISSION_CHECKS="1",
         # Without a terminal Qt would log to the system journal.
         QT_FORCE_STDERR_LOGGING="1",
@@ -267,6 +286,11 @@ def prepare_home(work: Path) -> Path:
     (home / ".bashrc").write_text(BASHRC, encoding="utf-8")
     (config / "kwinrulesrc").write_text(WINDOW_RULES, encoding="utf-8")
     (config / "kwinrc").write_text("[Desktops]\nNumber=1\nRows=1\n", encoding="utf-8")
+    # The profile Konsole writes on first use; apply --konsole colours existing profiles only.
+    profiles = home / ".local" / "share" / "konsole"
+    profiles.mkdir(parents=True)
+    (profiles / "Main.profile").write_text("[General]\nName=Main\nParent=FALLBACK/\n", encoding="utf-8")
+    (config / "konsolerc").write_text("[Desktop Entry]\nDefaultProfile=Main.profile\n", encoding="utf-8")
     return home
 
 
@@ -279,9 +303,11 @@ def commands(pal: Palette, installed: bool) -> tuple[str, str]:
     return f'step install "{python}" "{script}" install', f'"{python}" "{script}" apply {pal.key} --konsole'
 
 
-def check(pal: Palette, installed: bool, program: str) -> bool:
-    with tempfile.TemporaryDirectory(prefix="khplasma-") as tmp_name:
+def check(pal: Palette, installed: bool, program: str, keep: bool) -> bool:
+    with tempfile.TemporaryDirectory(prefix="khplasma-", delete=not keep) as tmp_name:
         work = Path(tmp_name)
+        if keep:
+            log.info("nestedplasma", "work folder kept", variant=pal.key, folder=str(work))
         prepare_home(work)
         env = private_env(work)
         install, apply = commands(pal, installed)
@@ -349,6 +375,7 @@ def main() -> int:
     parser.add_argument("--variant", choices=[p.key for p in VARIANTS], help="check a single variant")
     parser.add_argument("--installed", action="store_true",
                         help=f"use the installed package ({PACKAGE_TOOL}) instead of this checkout's build")
+    parser.add_argument("--keep", action="store_true", help="keep each session's home folder and logs")
     args = parser.parse_args()
     if args.installed and shutil.which(PACKAGE_TOOL) is None:
         log.error("nestedplasma", "the package is not installed", command=PACKAGE_TOOL)
@@ -357,7 +384,7 @@ def main() -> int:
     if program is None:
         return 2
     start = time.monotonic()
-    failed = [pal.key for pal in VARIANTS if args.variant in (None, pal.key) and not check(pal, args.installed, program)]
+    failed = [pal.key for pal in VARIANTS if args.variant in (None, pal.key) and not check(pal, args.installed, program, args.keep)]
     if failed:
         log.error("nestedplasma", "check failed", variants=failed)
         return 1
