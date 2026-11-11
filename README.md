@@ -228,11 +228,17 @@ Desktop and Wallpaper). The menu plugin is loaded by the Plasma shell from
 the shell once so the running session finds it. The AUR package puts the plugin
 in Qt's own plugin folder instead, where the shell finds it without the script.
 
-Applying a Global Theme together with its desktop layout (Breeze's, for
-example) makes the shell discard its whole configuration and rebuild the
-default desktop, mouse actions included, so the binding is gone afterwards.
-`status` reports this as `"keyblade_browser_bound": false`; run `apply` again
-to restore it.
+Applying a Global Theme together with its desktop layout (Breeze's, or one
+of these from System Settings with "Desktop and window layout" ticked) makes
+the shell discard its whole configuration and rebuild the default desktop,
+mouse actions included. `apply` therefore also adds a drop-in,
+`~/.config/systemd/user/plasma-plasmashell.service.d/kingdom-hearts-plasma.conf`,
+that runs `install.py rebind` before every shell start: if the binding is gone
+it is put back, so it returns at the next login or reboot. A different action
+you chose for Super + right click under Mouse Actions is left alone. Until the
+shell restarts, `status` reports `"keyblade_browser_bound": false`; run
+`apply` again to get it back at once. `revert` and `uninstall` remove the
+drop-in.
 
 ### Fonts
 
@@ -242,21 +248,32 @@ fonts. To use KHMenu elsewhere, pick it in System Settings → Fonts.
 
 ### Login screen
 
-SDDM themes live in system directories, so this step needs root. Print the
-commands with:
+Each variant is its own SDDM theme, `KingdomHearts-OrgXIII` and
+`KingdomHearts-Sora`. SDDM themes live in system directories, so installing
+them needs root:
 
 ```sh
-./install.py sddm
+./install.py sddm          # asks which login screen to use, then sudo
+./install.py sddm Sora     # or name it: OrgXIII | Sora | off
+./install.py sddm --print  # show the root commands instead of running them
 ```
 
-The AUR package installs the theme into `/usr/share/sddm/themes` already, and
-`kingdom-hearts-plasma sddm` prints only the command that selects it.
+It copies both themes into `/usr/share/sddm/themes` and sets `[Theme] Current`
+in the SDDM config file that currently decides it, usually
+`/etc/sddm.conf.d/kde_settings.conf`, which System Settings' Login Screen page
+writes. SDDM reads its config files in name order and the last value wins, so a
+separate drop-in would lose to that file. Once installed, both themes are also
+listed in System Settings → Colors & Themes → Login Screen (SDDM). `off` goes
+back to the login screen used before. The change shows the next time SDDM
+starts. `apply` and `status` say when the login screen is not one of these.
 
-The variant is chosen in `theme.conf` inside the installed theme
-(`variant=OrgXIII` or `variant=Sora`). The login screen is fitted to each
-variant's default picture at build time: the clock and login card stand over
-the calmest of the left, middle and right thirds, and the text turns light when
-the picture is dark, whichever variant it belongs to.
+The AUR package installs both themes already, and `kingdom-hearts-plasma sddm`
+only selects one.
+
+The login screen is fitted to each variant's default picture at build time: the
+clock and login card stand over the calmest of the left, middle and right
+thirds, and the text turns light when the picture is dark, whichever variant it
+belongs to.
 
 ### Terminal
 

@@ -7,7 +7,8 @@
     ./install.py status             show what is installed and what is active
     ./install.py keyblade [<name>]  list the pointer keyblades, or point with one
     ./install.py uninstall          remove every installed file (revert first)
-    ./install.py sddm               print the root commands that install the login theme
+    ./install.py sddm [<variant>]   install the login themes and pick one (OrgXIII | Sora | off); asks for sudo
+    ./install.py rebind             put Super + right click back if a desktop reset removed it (run at shell start)
     ./install.py stage --destdir D  lay the themes out under D/usr for a distribution package
 
 A distribution package installs everything system-wide with `stage` and puts
@@ -27,13 +28,14 @@ import argparse
 import datetime
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from khtheme import VERSION, kvantum, log, picker, wallpapers
+from khtheme import VERSION, kvantum, log, picker, sddm, wallpapers
 from khtheme.colorscheme import scheme_id
 from khtheme.palette import ORG_XIII, SORA, VARIANTS, Palette
 from khtheme.sounds import THEME_ID as SOUND_THEME
@@ -110,6 +112,10 @@ PLUGIN = PLUGIN_ROOT / picker.NAMESPACE / f"{picker.PLUGIN_ID}.so"
 ENV_SCRIPT = CONFIG / "plasma-workspace" / "env" / "kingdom-hearts-plasma.sh"
 KEYBLADE_RC = CONFIG / "kingdom-hearts-plasmarc"
 SHELL_SERVICE = "plasma-plasmashell.service"
+# Runs `rebind` each time the shell starts, before it reads its mouse actions:
+# applying a Global Theme with its desktop layout makes the shell rewrite its
+# configuration without them, and the shell itself never puts them back.
+SHELL_HOOK = CONFIG / "systemd" / "user" / f"{SHELL_SERVICE}.d" / "kingdom-hearts-plasma.conf"
 # What KWin does with Super + right click. Its default, resizing, swallows the
 # click even on the desktop. This one activates the window under the pointer
 # (the desktop too) and passes the click on, so the shell both gets the click
@@ -142,6 +148,19 @@ SETTINGS = {
 }
 CONFIG_FILES = ["kdeglobals", "kwinrc", "plasmarc", "kcminputrc", "ksplashrc", "kscreenlockerrc",
                 "plasma-org.kde.plasma.desktop-appletsrc"]
+
+# SDDM reads these in order, files within a folder sorted by name; a later
+# value overrides an earlier one.
+SDDM_CONF_DIRS = [Path("/usr/lib/sddm/sddm.conf.d"), Path("/etc/sddm.conf.d")]
+SDDM_CONF = Path("/etc/sddm.conf")
+SDDM_THEMES = Path("/usr/share/sddm/themes")
+# The file System Settings' Login Screen page writes; choosing here through it
+# keeps that page in step.
+SDDM_KDE_CONF = Path("/etc/sddm.conf.d/kde_settings.conf")
+# Written by earlier versions; it sorts before kde_settings.conf and so lost to it.
+SDDM_LEGACY_CONF = Path("/etc/sddm.conf.d/10-kingdom-hearts.conf")
+SDDM_STATE = STATE / "sddm.json"
+SDDM_FALLBACK = "breeze"
 
 REQUIRED_TOOLS = ["kreadconfig6", "kwriteconfig6", "plasma-apply-lookandfeel", "plasma-apply-wallpaperimage",
                   "plasma-apply-colorscheme", "plasma-apply-desktoptheme", "plasma-apply-cursortheme", "qdbus6"]
@@ -437,6 +456,7 @@ def cmd_uninstall(_args) -> int:
                     log.error("install", "remove failed", error=exc, path=str(entry))
                     return 1
     removed += remove_legacy()
+    remove_shell_hook()
     for path in (OWN_DATA, ENV_SCRIPT, KEYBLADE_RC):
         if path.exists():
             try:
@@ -707,6 +727,7 @@ def enable_keyblade_browser() -> None:
                   "Super + right click left as it was", plugin=str(plugin), missing=stale, hint=rebuild_hint())
         return
     write_setting(*SETTINGS["meta_right_window"], PASS_CLICK)
+    install_shell_hook()
     bound = read_setting(*SETTINGS["meta_right_desktop"]) == picker.PLUGIN_ID
     if not bound:
         # The shell only writes this group from its own settings page, so it
@@ -722,7 +743,83 @@ def enable_keyblade_browser() -> None:
     log.info("install", "Super + right click on the desktop opens the keyblade browser", plugin=str(plugin))
 
 
+def hook_command() -> str:
+    """The `rebind` command line for the shell hook, quoted for systemd."""
+    launcher = Path("/usr/bin") / SYSTEM_TOOL
+    if SYSTEM_INSTALL.is_file() and launcher.is_file():
+        return f'"{launcher}" rebind'
+    return f'"{sys.executable}" "{Path(__file__).resolve()}" rebind'
+
+
+def install_shell_hook() -> None:
+    """Make every shell start put the Super + right click binding back if it was removed."""
+    text = (
+        "# Kingdom Hearts theme: restores Super + right click (Keyblade Browser) on the\n"
+        "# desktop if a desktop layout reset removed it. Removed by revert and uninstall.\n"
+        "[Service]\n"
+        # The leading '-' keeps a failing or missing command from stopping the shell.
+        f"ExecStartPre=-{hook_command()}\n"
+    )
+    try:
+        if SHELL_HOOK.is_file() and SHELL_HOOK.read_text(encoding="utf-8") == text:
+            log.debug("install", "shell hook already in place", path=str(SHELL_HOOK))
+            return
+        SHELL_HOOK.parent.mkdir(parents=True, exist_ok=True)
+        SHELL_HOOK.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        log.warn("install", "could not install the shell hook; a desktop reset will remove Super + right click until "
+                 "the next apply", error=exc, path=str(SHELL_HOOK))
+        return
+    session_tool(["systemctl", "--user", "daemon-reload"], "reload user units")
+    log.info("install", "shell hook installed: Super + right click is restored whenever the shell starts",
+             path=str(SHELL_HOOK), command=hook_command())
+
+
+def remove_shell_hook() -> None:
+    if not SHELL_HOOK.exists():
+        return
+    try:
+        SHELL_HOOK.unlink()
+        if not any(SHELL_HOOK.parent.iterdir()):
+            SHELL_HOOK.parent.rmdir()
+    except OSError as exc:
+        log.warn("install", "could not remove the shell hook", error=exc, path=str(SHELL_HOOK))
+        return
+    session_tool(["systemctl", "--user", "daemon-reload"], "reload user units")
+    log.info("install", "shell hook removed", path=str(SHELL_HOOK))
+
+
+def cmd_rebind(_args) -> int:
+    """Run by the shell hook before the shell starts. Never fails: the shell
+    starts either way, so problems are only logged."""
+    plugin = installed_plugin()
+    if plugin is None:
+        log.warn("rebind", "keyblade browser not installed; nothing to bind", expected=str(PLUGIN))
+        return 0
+    stale = unresolved_libraries(plugin)
+    if stale:
+        log.error("rebind", "the keyblade browser cannot load until it is rebuilt; binding left as it is",
+                  plugin=str(plugin), missing=stale, hint=rebuild_hint())
+        return 0
+    current = read_setting(*SETTINGS["meta_right_desktop"])
+    if current == picker.PLUGIN_ID:
+        log.debug("rebind", "Super + right click is bound to the keyblade browser")
+    elif current:
+        # Something else was chosen on the shell's Mouse Actions page; that choice stands.
+        log.info("rebind", "Super + right click is bound to another action; left as it is", action=current)
+        return 0
+    else:
+        write_setting(*SETTINGS["meta_right_desktop"], picker.PLUGIN_ID)
+        log.info("rebind", "Super + right click was removed (desktop layout reset); bound to the keyblade browser again")
+    if read_setting(*SETTINGS["meta_right_window"]) != PASS_CLICK:
+        write_setting(*SETTINGS["meta_right_window"], PASS_CLICK)
+        run(["qdbus6", "org.kde.KWin", "/KWin", "reconfigure"], "reload window manager", check=False)
+        log.info("rebind", "KWin set to pass Super + right click on to the desktop again")
+    return 0
+
+
 def disable_keyblade_browser(saved: dict) -> None:
+    remove_shell_hook()
     write_setting(*SETTINGS["meta_right_window"], saved.get("meta_right_window"))
     if points_at_ours(read_setting(*SETTINGS["meta_right_desktop"])):
         write_setting(*SETTINGS["meta_right_desktop"], saved.get("meta_right_desktop"))
@@ -788,6 +885,10 @@ def cmd_apply(args) -> int:
     reload_cursors(pal)
     reload_decoration(pal)
     notify_style_change()
+    login, _ = sddm_current()
+    if not is_ours(login):
+        log.info("install", "the login screen is not themed", current=login or "<default>",
+                 hint=f"./install.py sddm {pal.key}  (or System Settings > Login Screen)")
     log.info("install", "variant applied", variant=pal.key, theme=pal.theme_id)
     return 0
 
@@ -880,6 +981,8 @@ def cmd_status(_args) -> int:
         "keyblade_browser": plugin is not None and not stale,
         "keyblade_browser_bound": bound,
         "keyblade_browser_missing_libraries": stale,
+        "keyblade_browser_shell_hook": SHELL_HOOK.is_file(),
+        "login_screen": sddm_current()[0] or None,
         "package": system_install().get("version"),
         "backup": str(BACKUP) if BACKUP.exists() else None,
     }
@@ -900,28 +1003,177 @@ def cmd_keyblade(args) -> int:
     return result.returncode
 
 
-def cmd_sddm(_args) -> int:
-    source = DIST / "sddm" / PREFIX
-    # SDDM reads themes from its one compiled-in folder, not the XDG ones.
-    packaged = Path("/usr/share/sddm/themes") / PREFIX
-    if not source.is_dir() and packaged.is_dir():
-        print(
-            "# The package installed the login theme; selecting it needs root:\n"
-            "sudo mkdir -p /etc/sddm.conf.d\n"
-            f"printf '[Theme]\\nCurrent={PREFIX}\\n' | sudo tee /etc/sddm.conf.d/10-kingdom-hearts.conf\n"
-            "# undo: sudo rm /etc/sddm.conf.d/10-kingdom-hearts.conf"
-        )
+def sddm_files() -> list[Path]:
+    files = [f for d in SDDM_CONF_DIRS if d.is_dir() for f in sorted(d.iterdir()) if f.is_file()]
+    return files + ([SDDM_CONF] if SDDM_CONF.is_file() else [])
+
+
+def ini_value(text: str, group: str, key: str) -> str | None:
+    """Last value of `key` in `[group]`, or None when the text does not set it."""
+    found, section = None, None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1]
+        elif section == group and "=" in line and line.split("=", 1)[0].strip() == key:
+            found = line.split("=", 1)[1].strip()
+    return found
+
+
+def sddm_current() -> tuple[str, Path | None]:
+    """The login theme SDDM will show, and the file that sets it (None: SDDM's default)."""
+    current, source = "", None
+    for path in sddm_files():
+        try:
+            value = ini_value(path.read_text(encoding="utf-8", errors="replace"), "Theme", "Current")
+        except OSError as exc:
+            log.warn("sddm", "could not read an SDDM config file", error=exc, path=str(path))
+            continue
+        if value is not None:
+            current, source = value, path
+    return current, source
+
+
+def with_ini_value(text: str, group: str, key: str, value: str) -> str:
+    """`text` with `key` in `[group]` set to `value`, every other line kept."""
+    lines = text.splitlines()
+    section, group_at, done = None, None, False
+    for n, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            section = stripped[1:-1]
+            if section == group:
+                group_at = n
+        elif section == group and "=" in stripped and stripped.split("=", 1)[0].strip() == key:
+            lines[n] = f"{key}={value}"
+            done = True
+    if not done:
+        if group_at is None:
+            lines += ([""] if lines and lines[-1].strip() else []) + [f"[{group}]", f"{key}={value}"]
+        else:
+            lines.insert(group_at + 1, f"{key}={value}")
+    return "\n".join(lines) + "\n"
+
+
+def sddm_source(pal: Palette) -> tuple[Path | None, bool]:
+    """Where the variant's login theme is: (folder, already in SDDM's theme folder)."""
+    built = DIST / "sddm" / sddm.theme_id(pal)
+    if built.is_dir():
+        return built, False
+    installed = SDDM_THEMES / sddm.theme_id(pal)
+    return (installed, True) if installed.is_dir() else (None, False)
+
+
+def choose_login(arg: str | None) -> str:
+    """'off' or a variant key: the argument, else asked, else the active variant."""
+    keys = [pal.key for pal in VARIANTS] + ["off"]
+    if arg:
+        match = next((k for k in keys if k.lower() == arg.lower()), None)
+        if match is None:
+            raise StepError(f"unknown login screen {arg!r}; choose from {keys}")
+        return match
+    active = read_setting(*SETTINGS["lookandfeel"]) if shutil.which("kreadconfig6") else ""
+    default = next((pal.key for pal in VARIANTS if pal.theme_id == active), VARIANTS[0].key)
+    if not sys.stdin.isatty():
+        log.info("sddm", "no login screen named and no terminal to ask; using the active variant", choice=default)
+        return default
+    options = [f"Kingdom Hearts – {pal.title} ({'dark' if pal.dark else 'light'})" for pal in VARIANTS]
+    options.append("Off: go back to the login screen used before")
+    print("Login screen:")
+    for n, text in enumerate(options, 1):
+        print(f"  {n}. {text}{'  [default]' if keys[n - 1] == default else ''}")
+    answer = input(f"Choose 1-{len(options)}: ").strip()
+    if not answer:
+        return default
+    if answer.isdigit() and 1 <= int(answer) <= len(options):
+        return keys[int(answer) - 1]
+    raise StepError(f"not a choice: {answer!r}")
+
+
+def cmd_sddm(args) -> int:
+    choice = choose_login(args.variant)
+    current, source = sddm_current()
+    script = ["set -e"]
+    if choice == "off":
+        try:
+            target = json.loads(SDDM_STATE.read_text(encoding="utf-8")).get("previous") or SDDM_FALLBACK
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warn("sddm", "no record of the earlier login screen; using Plasma's", error=exc, fallback=SDDM_FALLBACK)
+            target = SDDM_FALLBACK
+    else:
+        pal = variant(choice)
+        target = sddm.theme_id(pal)
+        missing = []
+        for each in VARIANTS:
+            folder, installed = sddm_source(each)
+            if folder is None:
+                missing.append(sddm.theme_id(each))
+            elif not installed:
+                dest = SDDM_THEMES / folder.name
+                script.append(f"rm -rf {shlex.quote(str(dest))}")
+                script.append(f"cp -r {shlex.quote(str(folder))} {shlex.quote(str(SDDM_THEMES))}/")
+                script.append(f"chmod -R u=rwX,go=rX {shlex.quote(str(dest))}")
+        if target in missing:
+            log.error("sddm", "login theme not built; run './build.py --only sddm'", missing=missing)
+            return 2
+        if missing:
+            log.warn("sddm", "a login theme is not built and is left out", missing=missing)
+        legacy = SDDM_THEMES / sddm.LEGACY_ID
+        if legacy.is_dir():
+            script.append(f"rm -rf {shlex.quote(str(legacy))}")
+    # Write where the value SDDM uses now comes from, so nothing later overrides
+    # it; a value from SDDM's own defaults goes into System Settings' file.
+    conf = source if source is not None and source != SDDM_LEGACY_CONF and str(source).startswith("/etc/") \
+        else SDDM_KDE_CONF
+    try:
+        text = conf.read_text(encoding="utf-8") if conf.is_file() else ""
+    except OSError as exc:
+        log.error("sddm", "could not read the SDDM config file", error=exc, path=str(conf))
+        return 1
+    staged = STATE / "sddm-config.new"
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        staged.write_text(with_ini_value(text, "Theme", "Current", target), encoding="utf-8")
+    except OSError as exc:
+        log.error("sddm", "could not prepare the SDDM config", error=exc, path=str(staged))
+        return 1
+    script.append(f"mkdir -p {shlex.quote(str(conf.parent))}")
+    script.append(f"install -m 644 {shlex.quote(str(staged))} {shlex.quote(str(conf))}")
+    if SDDM_LEGACY_CONF.exists():
+        script.append(f"rm -f {shlex.quote(str(SDDM_LEGACY_CONF))}")
+    shell = "\n".join(script) + "\n"
+    if args.print:
+        print(f"# Selects login screen {target} (needs root):")
+        print(f"sudo sh -c {shlex.quote(shell)}")
         return 0
-    if not source.is_dir():
-        log.error("install", "login theme not built; run './build.py --only sddm'", expected=str(source))
-        return 2
-    print(
-        "# The login screen lives in system directories, so these need root:\n"
-        f"sudo cp -r {source} /usr/share/sddm/themes/\n"
-        "sudo mkdir -p /etc/sddm.conf.d\n"
-        f"printf '[Theme]\\nCurrent={PREFIX}\\n' | sudo tee /etc/sddm.conf.d/10-kingdom-hearts.conf\n"
-        "# undo: sudo rm /etc/sddm.conf.d/10-kingdom-hearts.conf"
-    )
+
+    log.info("sddm", "setting the login screen; sudo asks for your password", choice=target, previous=current or "<default>",
+             config=str(conf))
+    started = time.monotonic()
+    try:
+        # Not captured: sudo needs the terminal to ask for the password.
+        result = subprocess.run(["sudo", "sh", "-c", shell], timeout=300)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        log.error("sddm", "could not run sudo", error=exc, hint="./install.py sddm --print shows the commands")
+        return 1
+    finally:
+        staged.unlink(missing_ok=True)
+    if result.returncode != 0:
+        log.error("sddm", "installing the login screen failed", exit_code=result.returncode,
+                  hint="./install.py sddm --print shows the commands")
+        return 1
+    if choice != "off" and not is_ours(current):
+        try:
+            SDDM_STATE.write_text(json.dumps({"previous": current}) + "\n", encoding="utf-8")
+        except OSError as exc:
+            log.warn("sddm", "could not record the earlier login screen; 'sddm off' will use Plasma's", error=exc)
+    shown, by = sddm_current()
+    if shown != target:
+        log.error("sddm", "another SDDM config file still overrides the login screen", wanted=target, shown=shown,
+                  file=str(by))
+        return 1
+    log.info("sddm", "login screen set; it shows from the next time SDDM starts (log out or reboot)", theme=target,
+             config=str(conf), duration_ms=round((time.monotonic() - started) * 1000))
     return 0
 
 
@@ -1011,7 +1263,12 @@ def main() -> int:
     keyblade_parser.add_argument("name", nargs="?", help="keyblade to point with, e.g. oathkeeper; omit to list them")
     keyblade_parser.set_defaults(fn=cmd_keyblade)
     sub.add_parser("uninstall").set_defaults(fn=cmd_uninstall)
-    sub.add_parser("sddm").set_defaults(fn=cmd_sddm)
+    sddm_parser = sub.add_parser("sddm")
+    sddm_parser.add_argument("variant", nargs="?", help="OrgXIII, Sora, or off (the login screen used before); "
+                             "omit to choose from a list")
+    sddm_parser.add_argument("--print", action="store_true", help="print the root commands instead of running them")
+    sddm_parser.set_defaults(fn=cmd_sddm)
+    sub.add_parser("rebind").set_defaults(fn=cmd_rebind)
     stage_parser = sub.add_parser("stage")
     stage_parser.add_argument("--destdir", required=True, help="root to lay /usr out under (a package's staging folder)")
     stage_parser.set_defaults(fn=cmd_stage)
