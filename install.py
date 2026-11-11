@@ -1421,9 +1421,13 @@ def span_wallpaper(auto: bool, picture: str | None = None) -> None:
         if any(is_span(d["image"]) for d in desks) or picture:
             set_desktop_pictures({n: "file://" + pictures["origin"] for n, _ in screens})
             log.info("span", "one screen: the whole picture is shown", picture=pictures["origin"])
-        shutil.rmtree(SPAN_ROOT, ignore_errors=True)
+        if SPAN_ROOT.exists():
+            shutil.rmtree(SPAN_ROOT, ignore_errors=True)
         # Kept, so a screen attached later is told apart from one the user changed.
-        save_json(SPAN_STATE, {"tag": None, "pictures": pictures, "screens": screens})
+        single = {"tag": None, "pictures": pictures, "screens": [list(x) for x in screens]}
+        if state != single:
+            save_json(SPAN_STATE, single)
+        log.debug("span", "one screen; nothing to spread", picture=pictures["origin"])
         return
     sources = [p for p in (pictures["light"], pictures["dark"]) if p]
     missing = [p for p in sources if not Path(p).is_file()]

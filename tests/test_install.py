@@ -279,6 +279,40 @@ class SpanChoice(unittest.TestCase):
         install.span_wallpaper(auto=True)
         self.assertEqual(len(self.set_calls), calls)
 
+    def one(self, image: str) -> None:
+        self.desks = [{"screen": 0, "image": image, "rect": [0, 0, 1920, 1080]}]
+
+    def test_a_single_screen_is_never_touched(self) -> None:
+        for image in (f"file://{self.ours}", f"file://{self.mine}", ""):
+            self.one(image)
+            install.span_wallpaper(auto=True)
+            install.span_wallpaper(auto=True)
+        self.assertEqual(self.set_calls, [])
+        self.cut.assert_not_called()
+        self.assertFalse((self.tmp / "span").exists())
+
+    def test_a_single_screen_needs_no_imagemagick(self) -> None:
+        self.one(f"file://{self.ours}")
+        with mock.patch.object(install.shutil, "which", return_value=None):
+            install.span_wallpaper(auto=True)
+        self.assertEqual(self.set_calls, [])
+
+    def test_a_second_screen_attached_later_is_spanned(self) -> None:
+        self.one(f"file://{self.ours}")
+        install.span_wallpaper(auto=True)
+        # Plasma gives the new screen's desktop some picture of its own.
+        self.desks.append({"screen": 1, "image": "file:///usr/share/wallpapers/Next", "rect": [1920, 0, 1080, 1920]})
+        install.span_wallpaper(auto=True)
+        self.assertEqual(sorted(self.set_calls[-1]), [0, 1])
+
+    def test_a_single_screens_own_picture_is_kept_when_a_screen_is_added(self) -> None:
+        self.one(f"file://{self.ours}")
+        install.span_wallpaper(auto=True)
+        self.one(f"file://{self.mine}")
+        self.desks.append({"screen": 1, "image": f"file://{self.ours}", "rect": [1920, 0, 1920, 1080]})
+        install.span_wallpaper(auto=True)
+        self.assertEqual(self.set_calls, [])
+
     def test_one_screen_shows_the_whole_picture(self) -> None:
         self.two(f"file://{self.ours}", f"file://{self.ours}")
         install.span_wallpaper(auto=True)
