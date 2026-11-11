@@ -106,6 +106,16 @@ files: `SE_MENU_NET_ERROR.wav` and `SE_MENU_NOTICE_003.wav`, from the
 archive.org item `kingdom-hearts-melody-of-memory-sound-effects-and-voices`
 (`Sound Effects.zip`, a rip of the Switch release).
 
+## `assets/title/` — login screens
+
+Both were supplied by the theme's owner and are stored exactly as received.
+They are official wallpapers with the game's logo printed on them.
+
+| File | What it shows | Kind | Source |
+| --- | --- | --- | --- |
+| `days.jpg` | *358/2 Days* logo; Roxas, Axel, Xion, Riku and King Mickey before the clock tower (Organization XIII login screen) | official wallpaper, 1280×1024 | supplied by the owner as `large.gallery_28068_20_97394.jpg.dd488b4acbae9c6b2cb162317ec35285.jpg` |
+| `kh2.jpg` | *Kingdom Hearts II* logo; Sora and Roxas with sea-salt ice cream (Sora login screen) | official wallpaper, 1024×768 | supplied by the owner as `kh-2-final-mix-hd.jpg` |
+
 ## `assets/wallpapers/`
 
 Each file is the source cropped to 16:9, scaled to at most 3840×2160 and saved
