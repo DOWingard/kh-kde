@@ -1,348 +1,406 @@
 """SDDM login themes: one theme directory per variant.
 
 Each variant is its own theme (`KingdomHearts-OrgXIII`, `KingdomHearts-Sora`),
-so both appear as choices in System Settings' Login Screen page and in
-`install.py sddm`. `theme.conf` still names the variant, which the QML uses to
-pick its colours, background and emblem. Installing needs root, so the build
-only stages the themes under dist/sddm.
+so both appear as choices in System Settings' Login Screen page. The screen is
+a title-screen wallpaper (Organization XIII: 358/2 Days; Sora: Kingdom Hearts
+II) with the sign-in drawn as the games' title menu: a column of bars, each
+with a square marker that lights up on the chosen row. The menu stands in the
+empty white part of the picture. Installing needs root, so the build only
+stages the themes under dist/sddm.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import sys
+import time
+from dataclasses import dataclass
 from pathlib import Path
 
-from . import log, wallpapers
-from .palette import WHITE, Palette, mix
+from . import log
+from .palette import ORG_XIII, SORA, Palette
 from .svg import write_text
 
-ASSETS = Path(__file__).resolve().parent.parent / "assets"
+ROOT = Path(__file__).resolve().parent.parent
+ASSETS = ROOT / "assets"
 FONTS = ASSETS / "fonts"
 FONT = "KHMenuBold.otf"
+# Stand-ins for the objects SDDM gives a theme, used to render the preview.
+HARNESS = ROOT / "tools" / "preview" / "sddm.qml"
+PREVIEW_SIZE = (1920, 1080)
+PREVIEW_SETTLE_MS = 1500
 
 THEME_ID = "KingdomHearts"
 # The single theme directory earlier versions built for both variants.
 LEGACY_ID = THEME_ID
 
 
+@dataclass(frozen=True)
+class Screen:
+    picture: str  # file under assets/title
+    # Horizontal place of the picture when the screen is wider than it
+    # (0 left, 1 right): the side where the painting runs off the edge.
+    align_x: float
+    # Empty part of the picture the menu is centred in, as fractions of the
+    # picture (left, top, right, bottom). An edge on the picture's border
+    # carries on to the screen's edge, so extra white beside the picture counts.
+    space: tuple[float, float, float, float]
+    accent: str  # band behind the chosen row
+    orb: tuple[str, str]  # top and bottom colour of the light in the marker
+    round_orb: bool
+
+
+SCREENS = {
+    # 358/2 Days: logo top left, painting on the right running off the edge.
+    ORG_XIII.key: Screen("days.jpg", 1.0, (0.0, 0.26, 0.43, 1.0), "#d0262c", ("#fff6b8", "#f2b705"), False),
+    # Kingdom Hearts II: painting top right, logo bottom left, white all round.
+    SORA.key: Screen("kh2.jpg", 0.5, (0.0, 0.0, 0.37, 0.62), "#ec5a24", ("#fff1b0", "#f07800"), True),
+}
+
+
 def theme_id(pal: Palette) -> str:
     return f"{THEME_ID}-{pal.key}"
 
-# A picture counts as dark below this mean luminance (0..1); text laid over it
-# is then light whatever the variant's own tone.
-DARK_PICTURE = 0.42
-# Where the login column may stand, as a share of the screen width. The centre
-# wins unless a side is calmer by more than CENTRE_BIAS.
-COLUMNS = (0.5, 0.27, 0.73)
-CENTRE_BIAS = 1.25
-# Part of the screen the column covers: width share, and height share from the top.
-COLUMN_SPAN = (0.34, 0.62)
 
 MAIN_QML = r"""import QtQuick
 
-// Login screen. SDDM provides the context objects `sddm`, `userModel`,
-// `sessionModel`, `keyboard` and `config` (the values from theme.conf).
+// Login screen laid out like the series' title menus. SDDM provides the
+// context objects `sddm`, `userModel`, `sessionModel`, `keyboard` and `config`.
 Rectangle {
     id: root
     width: 1920
     height: 1080
+    color: "white"
 
-    readonly property var variants: (%(variants)s)
-    readonly property string variantKey: variants[config.variant] !== undefined ? config.variant : "%(fallback)s"
-    readonly property var t: variants[variantKey]
-    readonly property real u: Math.max(0.6, Math.min(width / 1920, height / 1080))
+    readonly property var c: (@CONFIG@)
+
+    // The picture is fitted whole; its white surround continues as the page.
+    readonly property real fit: Math.min(width / c.size[0], height / c.size[1])
+    readonly property real picW: c.size[0] * fit
+    readonly property real picH: c.size[1] * fit
+    readonly property real picX: (width - picW) * c.alignX
+    readonly property real picY: (height - picH) / 2
+    // The empty part of the picture the menu is centred in.
+    readonly property real spaceL: c.space[0] <= 0 ? 0 : picX + c.space[0] * picW
+    readonly property real spaceT: c.space[1] <= 0 ? 0 : picY + c.space[1] * picH
+    readonly property real spaceR: c.space[2] >= 1 ? width : picX + c.space[2] * picW
+    readonly property real spaceB: c.space[3] >= 1 ? height : picY + c.space[3] * picH
+    // Menu scale: 1 on a 1080-line screen, smaller when the empty part is too small.
+    readonly property real u: Math.max(0.4, Math.min(height / 1080, (spaceR - spaceL) * 0.88 / 620,
+                                                     (spaceB - spaceT) * 0.92 / 560))
+
+    readonly property var rows: [nameRow, passRow, loginRow, sessionRow, powerRow]
+    property int current: userModel.lastUser ? 1 : 0
     property int sessionIndex: sessionModel.lastIndex >= 0 ? sessionModel.lastIndex : 0
-
-    color: t.base
+    property int powerIndex: 0
+    property bool failed: false
+    property bool busy: false
+    property string notice: ""
+    readonly property var powers: {
+        var list = [];
+        if (sddm.canPowerOff) list.push({ key: "off", label: "Shut Down" });
+        if (sddm.canReboot) list.push({ key: "reboot", label: "Restart" });
+        if (sddm.canSuspend) list.push({ key: "suspend", label: "Suspend" });
+        return list;
+    }
 
     FontLoader { id: menuFont; source: "assets/KHMenuBold.otf" }
 
     function login() {
-        message.text = "";
-        sddm.login(userField.text, passField.text, root.sessionIndex);
+        root.failed = false;
+        root.notice = "";
+        root.busy = true;
+        sddm.login(nameInput.text, passInput.text, root.sessionIndex);
     }
+    function power() {
+        if (root.powers.length === 0) return;
+        var key = root.powers[root.powerIndex % root.powers.length].key;
+        if (key === "off") sddm.powerOff();
+        else if (key === "reboot") sddm.reboot();
+        else sddm.suspend();
+    }
+    function select(n) {
+        root.current = Math.max(0, Math.min(root.rows.length - 1, n));
+    }
+    onCurrentChanged: rows[current].takeFocus()
 
     Connections {
         target: sddm
         function onLoginFailed() {
-            message.text = "Login failed — check the name and password.";
-            passField.text = "";
-            passField.grab();
-            shake.restart();
+            root.busy = false;
+            root.failed = true;
+            passInput.text = "";
+            root.select(1);
+            root.rows[1].takeFocus();
         }
-        function onLoginSucceeded() {
-            message.text = "";
-        }
+        function onLoginSucceeded() { root.busy = false; }
+        function onInformationMessage(message) { root.notice = message; }
     }
 
     Image {
-        anchors.fill: parent
-        source: "assets/background-" + root.variantKey + ".jpg"
-        fillMode: Image.PreserveAspectCrop
-        asynchronous: true
-        opacity: status == Image.Ready ? 1 : 0
-        Behavior on opacity { NumberAnimation { duration: 400 } }
-    }
-    Rectangle { anchors.fill: parent; color: root.t.scrim; opacity: root.t.scrimOpacity }
-
-    // The clock, emblem and login card share this axis. It stands over the
-    // calm part of the picture rather than always in the middle.
-    Item { id: axis; x: Math.round(root.width * root.t.loginX); width: 0; height: 1 }
-
-    // ---- clock ----
-    Column {
-        id: clock
-        anchors.horizontalCenter: axis.horizontalCenter
-        y: Math.round(root.height * 0.07)
-        spacing: Math.round(4 * root.u)
-        property date now: new Date()
-        Timer { interval: 1000; running: true; repeat: true; onTriggered: clock.now = new Date() }
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: Qt.formatTime(clock.now, "hh:mm")
-            color: root.t.text
-            font.family: menuFont.name
-            font.weight: Font.Bold
-            font.pixelSize: Math.round(96 * root.u)
-        }
-        Text {
-            anchors.horizontalCenter: parent.horizontalCenter
-            text: Qt.formatDate(clock.now, "dddd, d MMMM")
-            color: root.t.textDim
-            font.pixelSize: Math.round(22 * root.u)
-            font.letterSpacing: Math.round(2 * root.u)
-        }
-    }
-
-    // ---- emblem + title card ----
-    Image {
-        id: emblem
-        anchors.horizontalCenter: axis.horizontalCenter
-        anchors.top: clock.bottom
-        anchors.topMargin: Math.round(30 * root.u)
-        source: "assets/emblem-" + root.variantKey + ".png"
-        height: Math.round(root.height * 0.15)
-        width: Math.round(height * implicitWidth / Math.max(1, implicitHeight))
+        x: root.picX; y: root.picY; width: root.picW; height: root.picH
+        source: "assets/" + root.c.picture
         smooth: true
         mipmap: true
     }
-    Text {
-        id: world
-        anchors.horizontalCenter: axis.horizontalCenter
-        anchors.top: emblem.bottom
-        anchors.topMargin: Math.round(18 * root.u)
-        text: root.t.world
-        color: root.t.text
-        font.family: menuFont.name
-        font.weight: Font.Bold
-        font.pixelSize: Math.round(20 * root.u)
-        font.letterSpacing: Math.round(6 * root.u)
-        font.capitalization: Font.AllUppercase
-    }
-    Rectangle {
-        id: rule
-        anchors.horizontalCenter: axis.horizontalCenter
-        anchors.top: world.bottom
-        anchors.topMargin: Math.round(12 * root.u)
-        width: Math.round(world.width * 0.6)
-        height: 1
-        color: root.t.ornament
-        opacity: 0.85
+
+    // Session names, read through delegates: SDDM's model has no get().
+    Item {
+        visible: false
+        Repeater { id: sessions; model: sessionModel; delegate: Item { property string sessionName: model.name } }
     }
 
-    // ---- reusable pieces ----
-    component Field: Rectangle {
-        id: field
-        property alias text: input.text
-        property alias editor: input
-        property string placeholder: ""
-        property bool secret: false
-        signal accepted()
-        width: Math.round(340 * root.u)
-        height: Math.round(44 * root.u)
-        radius: Math.round(root.t.radius * root.u)
-        color: root.t.field
-        border.width: input.activeFocus ? 2 : 1
-        border.color: input.activeFocus ? root.t.focus : root.t.line
-        Behavior on border.color { ColorAnimation { duration: 120 } }
-        function grab() { input.forceActiveFocus(); }
-        Text {
-            anchors.fill: input
-            verticalAlignment: Text.AlignVCenter
-            visible: input.text.length === 0
-            text: field.placeholder
-            color: root.t.fieldDim
-            font: input.font
-        }
-        TextInput {
-            id: input
-            anchors.fill: parent
-            anchors.leftMargin: Math.round(14 * root.u)
-            anchors.rightMargin: Math.round(14 * root.u)
-            verticalAlignment: TextInput.AlignVCenter
-            clip: true
-            color: root.t.fieldText
-            selectionColor: root.t.select
-            selectedTextColor: root.t.selectText
-            font.pixelSize: Math.round(16 * root.u)
-            echoMode: field.secret ? TextInput.Password : TextInput.Normal
-            passwordCharacter: "●"
-            onAccepted: field.accepted()
-        }
-    }
+    // ---- one menu bar ----
+    component MenuRow: FocusScope {
+        id: row
+        property int index: 0
+        property string caption: ""
+        property Item input: null
+        readonly property bool selected: root.current === index
+        default property alias content: slot.data
+        signal activated()
+        signal cycled(int step)
+        function takeFocus() { if (input) input.forceActiveFocus(); else row.forceActiveFocus(); }
+        width: Math.round(620 * root.u)
+        height: Math.round(60 * root.u)
+        activeFocusOnTab: false
 
-    component Action: Rectangle {
-        id: action
-        property string label: ""
-        signal triggered()
-        activeFocusOnTab: true
-        implicitWidth: caption.implicitWidth + Math.round(28 * root.u)
-        height: Math.round(36 * root.u)
-        width: implicitWidth
-        radius: Math.round(root.t.radius * root.u)
-        color: area.pressed ? root.t.select : (area.containsMouse || activeFocus ? root.t.hoverFill : "transparent")
-        border.width: 1
-        border.color: area.containsMouse || activeFocus ? root.t.focus : "transparent"
-        Behavior on color { ColorAnimation { duration: 120 } }
-        Keys.onReturnPressed: action.triggered()
-        Keys.onSpacePressed: action.triggered()
-        Text {
-            id: caption
-            anchors.centerIn: parent
-            text: action.label
-            color: area.pressed ? root.t.selectText : root.t.text
-            font.pixelSize: Math.round(15 * root.u)
-        }
-        MouseArea { id: area; anchors.fill: parent; hoverEnabled: true; onClicked: action.triggered() }
-    }
-
-    // ---- login card ----
-    Rectangle {
-        id: card
-        anchors.horizontalCenter: axis.horizontalCenter
-        anchors.top: rule.bottom
-        anchors.topMargin: Math.round(34 * root.u)
-        width: form.width + Math.round(56 * root.u)
-        height: form.height + Math.round(48 * root.u)
-        radius: Math.round(root.t.radius * 1.5 * root.u)
-        color: root.t.glass
-        border.width: 1
-        border.color: root.t.edge
-
-        SequentialAnimation {
-            id: shake
-            NumberAnimation { target: card; property: "anchors.horizontalCenterOffset"; to: 14; duration: 50 }
-            NumberAnimation { target: card; property: "anchors.horizontalCenterOffset"; to: -14; duration: 80 }
-            NumberAnimation { target: card; property: "anchors.horizontalCenterOffset"; to: 8; duration: 70 }
-            NumberAnimation { target: card; property: "anchors.horizontalCenterOffset"; to: 0; duration: 60 }
-        }
-
-        Column {
-            id: form
-            anchors.centerIn: parent
-            spacing: Math.round(12 * root.u)
-
-            Field {
-                id: userField
-                placeholder: "Name"
-                text: userModel.lastUser
-                onAccepted: passField.grab()
-                KeyNavigation.tab: passField.editor
+        // The square marker; the chosen row's holds a light.
+        Rectangle {
+            id: marker
+            width: row.height; height: row.height
+            color: row.selected ? "#151515" : "#c8c8c8"
+            Behavior on color { ColorAnimation { duration: 120 } }
+            Rectangle {
+                anchors.centerIn: parent
+                visible: row.selected
+                width: parent.width * 0.8; height: width
+                radius: root.c.roundOrb ? width / 2 : width * 0.22
+                color: root.c.glow
             }
-            Row {
-                spacing: Math.round(10 * root.u)
-                Field {
-                    id: passField
-                    width: userField.width - enter.width - parent.spacing
-                    placeholder: "Password"
-                    secret: true
-                    onAccepted: root.login()
-                    KeyNavigation.tab: enter
+            Rectangle {
+                anchors.centerIn: parent
+                visible: row.selected
+                width: parent.width * 0.52; height: width
+                radius: root.c.roundOrb ? width / 2 : width * 0.18
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: root.c.orbTop }
+                    GradientStop { position: 1.0; color: root.c.orbBottom }
                 }
-                Rectangle {
-                    id: enter
-                    width: height
-                    height: passField.height
-                    radius: passField.radius
-                    activeFocusOnTab: true
-                    color: enterArea.pressed ? root.t.selectDeep : root.t.select
-                    border.width: activeFocus ? 2 : 0
-                    border.color: root.t.ornament
-                    Keys.onReturnPressed: root.login()
-                    Keys.onSpacePressed: root.login()
-                    // arrow drawn from two rotated bars so no icon font is needed
-                    Item {
-                        anchors.centerIn: parent
-                        width: Math.round(14 * root.u); height: width
-                        Rectangle { width: parent.width; height: 2; color: root.t.selectText; anchors.verticalCenter: parent.verticalCenter }
-                        Rectangle { width: parent.width * 0.55; height: 2; color: root.t.selectText; rotation: 45; antialiasing: true
-                                    x: parent.width * 0.52; y: parent.height / 2 - parent.width * 0.2 - 1 }
-                        Rectangle { width: parent.width * 0.55; height: 2; color: root.t.selectText; rotation: -45; antialiasing: true
-                                    x: parent.width * 0.52; y: parent.height / 2 + parent.width * 0.2 - 1 }
-                    }
-                    MouseArea { id: enterArea; anchors.fill: parent; onClicked: root.login() }
+            }
+        }
+        // The bar: a band that deepens toward its end, and a rule beneath.
+        Rectangle {
+            id: bar
+            x: marker.width + Math.round(6 * root.u)
+            width: row.width - x
+            height: row.height
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: row.selected ? root.c.band0 : root.c.grey0 }
+                GradientStop { position: 0.5; color: row.selected ? root.c.band0 : root.c.grey0 }
+                GradientStop { position: 0.85; color: row.selected ? root.c.band : root.c.grey }
+                GradientStop { position: 1.0; color: row.selected ? root.c.bandEnd : root.c.greyEnd }
+            }
+            Rectangle {
+                anchors.bottom: parent.bottom
+                x: -marker.width - Math.round(6 * root.u)
+                width: row.width
+                height: Math.max(2, Math.round((row.selected ? 4 : 3) * root.u))
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: row.selected ? "#151515" : "#c8c8c8" }
+                    GradientStop { position: 0.75; color: row.selected ? "#151515" : "#d8d8d8" }
+                    GradientStop { position: 1.0; color: row.selected ? "#00151515" : "#00d8d8d8" }
                 }
             }
             Text {
-                id: message
-                width: userField.width
-                horizontalAlignment: Text.AlignHCenter
-                wrapMode: Text.WordWrap
-                visible: text.length > 0 || keyboard.capsLock
-                text: ""
-                color: root.t.negative
-                font.pixelSize: Math.round(14 * root.u)
-                Text {
-                    anchors.fill: parent
-                    horizontalAlignment: Text.AlignHCenter
-                    visible: message.text.length === 0 && keyboard.capsLock
-                    text: "Caps Lock is on"
-                    color: root.t.neutral
-                    font: message.font
+                anchors.right: parent.right
+                anchors.rightMargin: Math.round(12 * root.u)
+                anchors.verticalCenter: parent.verticalCenter
+                text: row.caption
+                color: row.selected ? "#ffffff" : "#a5a5a5"
+                font.family: menuFont.name
+                font.pixelSize: Math.round(15 * root.u)
+                font.letterSpacing: Math.round(3 * root.u)
+            }
+        }
+        Item {
+            id: slot
+            x: marker.width + Math.round(24 * root.u)
+            width: row.width - x - Math.round(110 * root.u)
+            height: row.height
+        }
+        // A click picks a row; a click on the picked row uses it.
+        MouseArea {
+            anchors.fill: parent
+            z: 10
+            onClicked: {
+                if (row.selected) row.activated(); else root.select(row.index);
+                row.takeFocus();
+            }
+        }
+        Keys.onPressed: (event) => {
+            if (event.key === Qt.Key_Up) root.select(root.current - 1);
+            else if (event.key === Qt.Key_Down) root.select(root.current + 1);
+            else if (event.key === Qt.Key_Tab) root.select((root.current + 1) % root.rows.length);
+            else if (event.key === Qt.Key_Backtab) root.select((root.current + root.rows.length - 1) % root.rows.length);
+            else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) row.activated();
+            else if (event.key === Qt.Key_Left) row.cycled(-1);
+            else if (event.key === Qt.Key_Right) row.cycled(1);
+            else return;
+            event.accepted = true;
+        }
+    }
+
+    // The menu's lettering: dark and outlined in white on the chosen row,
+    // pale grey and engraved on the others.
+    component RowText: Text {
+        property bool selected: false
+        anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+        color: selected ? "#141414" : "#c6c6c6"
+        style: Text.Outline
+        styleColor: selected ? "#ffffff" : "#a2a2a2"
+        font.family: menuFont.name
+        font.pixelSize: Math.round(40 * root.u)
+        font.letterSpacing: Math.round(4 * root.u)
+        // Long values (session names) shrink to fit their bar.
+        fontSizeMode: Text.HorizontalFit
+        minimumPixelSize: Math.round(20 * root.u)
+        elide: Text.ElideRight
+        width: parent ? parent.width : implicitWidth
+    }
+
+    component RowInput: TextInput {
+        property bool selected: false
+        anchors.verticalCenter: parent.verticalCenter
+        width: parent.width
+        clip: true
+        color: selected ? "#141414" : "#c6c6c6"
+        selectionColor: root.c.accent
+        selectedTextColor: "#ffffff"
+        font.family: menuFont.name
+        font.pixelSize: Math.round(40 * root.u)
+        font.letterSpacing: Math.round(4 * root.u)
+    }
+
+    Column {
+        id: menu
+        x: Math.round((root.spaceL + root.spaceR - width) / 2)
+        y: Math.round((root.spaceT + root.spaceB - height) / 2)
+        width: Math.round(620 * root.u)
+        spacing: Math.round(30 * root.u)
+
+        // Where the title screen credits its developer: a greeting, or what went wrong.
+        Item {
+            width: menu.width
+            height: Math.round(92 * root.u)
+            Text {
+                id: small
+                x: Math.round(14 * root.u)
+                text: root.failed ? "Login failed" : root.busy ? "Logging in" : root.notice.length > 0 ? root.notice
+                      : keyboard.capsLock ? "Caps Lock is on" : "Welcome to"
+                color: root.failed ? root.c.accent : "#8e8e8e"
+                font.family: menuFont.name
+                font.pixelSize: Math.round(22 * root.u)
+                font.letterSpacing: Math.round(4 * root.u)
+                font.capitalization: Font.AllUppercase
+                width: menu.width - x
+                elide: Text.ElideRight
+            }
+            Rectangle {
+                anchors.top: small.bottom
+                anchors.topMargin: Math.round(6 * root.u)
+                width: Math.round(menu.width * 0.5)
+                height: Math.max(1, Math.round(2 * root.u))
+                gradient: Gradient {
+                    orientation: Gradient.Horizontal
+                    GradientStop { position: 0.0; color: "#b4b4b4" }
+                    GradientStop { position: 0.7; color: "#b4b4b4" }
+                    GradientStop { position: 1.0; color: "#00b4b4b4" }
+                }
+            }
+            Text {
+                x: Math.round(28 * root.u)
+                anchors.bottom: parent.bottom
+                text: sddm.hostName
+                color: "#a7a7a7"
+                font.family: menuFont.name
+                font.pixelSize: Math.round(34 * root.u)
+                font.letterSpacing: Math.round(6 * root.u)
+                font.capitalization: Font.AllUppercase
+                width: menu.width - x
+                elide: Text.ElideRight
+            }
+        }
+
+        Column {
+            spacing: Math.round(16 * root.u)
+
+            MenuRow {
+                id: nameRow
+                index: 0
+                caption: "NAME"
+                input: nameInput
+                onActivated: root.select(1)
+                RowText { selected: nameRow.selected; visible: nameInput.text.length === 0; text: "NAME" }
+                // Shown in capitals like the rest of the menu; what is typed is kept as typed.
+                RowInput { id: nameInput; selected: nameRow.selected; text: userModel.lastUser; font.capitalization: Font.AllUppercase }
+            }
+            MenuRow {
+                id: passRow
+                index: 1
+                caption: "PASSWORD"
+                input: passInput
+                onActivated: root.login()
+                RowText { selected: passRow.selected; visible: passInput.text.length === 0; text: "PASSWORD" }
+                RowInput {
+                    id: passInput
+                    selected: passRow.selected
+                    echoMode: TextInput.Password
+                    passwordCharacter: "•"
+                    onTextChanged: if (text.length > 0) root.failed = false
+                }
+            }
+            MenuRow {
+                id: loginRow
+                index: 2
+                onActivated: root.login()
+                RowText { selected: loginRow.selected; text: "LOG IN" }
+            }
+            MenuRow {
+                id: sessionRow
+                index: 3
+                caption: "SESSION"
+                readonly property var item: sessions.count > 0 ? sessions.itemAt(root.sessionIndex % sessions.count) : null
+                onActivated: cycled(1)
+                onCycled: (step) => { if (sessions.count > 0) root.sessionIndex = (root.sessionIndex + step + sessions.count) % sessions.count; }
+                RowText {
+                    selected: sessionRow.selected
+                    text: (sessionRow.selected ? "‹ " : "") + (sessionRow.item ? sessionRow.item.sessionName : "Default").toUpperCase()
+                          + (sessionRow.selected ? " ›" : "")
+                }
+            }
+            MenuRow {
+                id: powerRow
+                index: 4
+                caption: "POWER"
+                visible: root.powers.length > 0
+                onActivated: root.power()
+                onCycled: (step) => { root.powerIndex = (root.powerIndex + step + root.powers.length) % root.powers.length; }
+                RowText {
+                    selected: powerRow.selected
+                    text: root.powers.length === 0 ? "" : (powerRow.selected ? "‹ " : "")
+                          + root.powers[root.powerIndex % root.powers.length].label.toUpperCase() + (powerRow.selected ? " ›" : "")
                 }
             }
         }
     }
 
-    // ---- session picker (click to cycle) and power actions ----
-    Item {
-        visible: false
-        Repeater {
-            id: sessions
-            model: sessionModel
-            delegate: Item { property string sessionName: model.name }
-        }
-    }
-    Row {
-        anchors.left: parent.left
-        anchors.bottom: parent.bottom
-        anchors.margins: Math.round(28 * root.u)
-        spacing: Math.round(8 * root.u)
-        Action {
-            readonly property var current: sessions.count > 0 ? sessions.itemAt(root.sessionIndex) : null
-            label: "Session: " + (current ? current.sessionName : "default")
-            onTriggered: if (sessions.count > 0) root.sessionIndex = (root.sessionIndex + 1) %% sessions.count
-        }
-    }
-    Row {
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        anchors.margins: Math.round(28 * root.u)
-        spacing: Math.round(8 * root.u)
-        Action { label: "Suspend"; visible: sddm.canSuspend; onTriggered: sddm.suspend() }
-        Action { label: "Restart"; visible: sddm.canReboot; onTriggered: sddm.reboot() }
-        Action { label: "Shut Down"; visible: sddm.canPowerOff; onTriggered: sddm.powerOff() }
-    }
-
-    Component.onCompleted: {
-        if (userField.text.length === 0) {
-            userField.grab();
-        } else {
-            passField.grab();
-        }
-    }
+    Component.onCompleted: rows[current].takeFocus()
 }
 """
 
@@ -352,125 +410,41 @@ def _rgba(hex_color: str, alpha: float) -> str:
     return f"#{round(alpha * 255):02x}{hex_color.lstrip('#')}"
 
 
-def _measure(image: Path, operations: list[str], what: str, statistic: str = "mean") -> float:
-    """A statistic (0..1) of the picture after `operations`."""
-    cmd = ["magick", str(image), *operations, "-format", f"%[fx:{statistic}]", "info:"]
+def _picture_size(path: Path) -> tuple[int, int]:
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=60)
-        return float(result.stdout.strip())
-    except FileNotFoundError as exc:
-        log.error("sddm", f"{what}: ImageMagick is not installed", error=exc)
+        result = subprocess.run(["magick", "identify", "-format", "%w %h", f"{path}[0]"], check=True,
+                                capture_output=True, text=True, timeout=60)
+        w, h = (int(v) for v in result.stdout.split())
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, ValueError) as exc:
+        log.error("sddm", "could not read the picture's size", error=exc, picture=str(path))
         raise
-    except subprocess.TimeoutExpired as exc:
-        log.error("sddm", f"{what} timed out", error=exc, image=image.name)
-        raise
-    except subprocess.CalledProcessError as exc:
-        log.error("sddm", f"{what} failed", error=exc, image=image.name, stderr=exc.stderr[-800:])
-        raise
-    except ValueError as exc:
-        log.error("sddm", f"{what}: unexpected output", error=exc, image=image.name)
-        raise
+    return w, h
 
 
-def _login_column(image: Path, size: tuple[int, int]) -> tuple[float, dict[float, float]]:
-    """Centre of the calmest place for the login column, and the detail found at each candidate.
-
-    Detail is the spread of brightness under the column. (An edge filter's
-    mean is no use here: its kernel sums to zero, so the mean is only noise.)
-    """
-    width, height = size
-    w, h = round(width * COLUMN_SPAN[0]), round(height * COLUMN_SPAN[1])
-    detail = {}
-    for centre in COLUMNS:
-        x = max(0, min(width - w, round(width * centre - w / 2)))
-        detail[centre] = _measure(
-            image, ["-crop", f"{w}x{h}+{x}+0", "+repage", "-colorspace", "Gray"], "measure picture detail",
-            statistic="standard_deviation",
-        )
-    calmest = min(detail, key=detail.get)
-    middle = COLUMNS[0]
-    return (middle if detail[middle] <= detail[calmest] * CENTRE_BIAS else calmest), detail
-
-
-def _variant_colors(pal: Palette, picture: Path | None, size: tuple[int, int] = (1920, 1080)) -> dict:
-    """Login colours for a variant, read off the picture it is shown over.
-
-    Without a picture (its variant is not built yet) the variant's own tone and
-    a centred column are assumed.
-    """
-    login_x = COLUMNS[0]
-    picture_dark = pal.dark
-    if picture is not None:
-        tone = _measure(picture, ["-colorspace", "Gray"], "measure picture tone")
-        picture_dark = tone < DARK_PICTURE
-        login_x, detail = _login_column(picture, size)
-        log.info("sddm", "login screen fitted to the picture", variant=pal.key, picture=picture.parent.parent.parent.name,
-                 tone=round(tone, 3), dark=picture_dark, column=login_x,
-                 detail={str(c): round(v, 4) for c, v in detail.items()})
-    colors = {
-        "base": pal.complementary if pal.dark else pal.window,
-        "scrim": pal.scrim[0],
-        "scrimOpacity": pal.scrim[1],
-        "world": pal.world,
-        "loginX": login_x,
-        "text": pal.text,
-        "textDim": pal.text_dim,
-        "ornament": pal.ornament if pal.dark else pal.ornament_deep,
-        "glass": _rgba(pal.glass_bot, 0.78),
-        "edge": _rgba(pal.edge_top[0], 0.7),
-        "field": _rgba(pal.view, 0.9),
-        "fieldText": pal.text,
-        "fieldDim": pal.text_dim,
-        "line": _rgba(pal.text_dim, 0.45),
-        "focus": pal.focus,
-        "select": pal.select,
-        "selectDeep": pal.select_deep,
-        "selectText": pal.select_text,
-        "hoverFill": _rgba(pal.hover, 0.22),
-        "negative": pal.negative,
-        "neutral": pal.neutral,
-        # Square fields for the clipped style, rounded ones for the heading style.
-        "radius": 0 if pal.corner == "cut" else 10,
+def config(pal: Palette, size: tuple[int, int]) -> dict:
+    screen = SCREENS[pal.key]
+    grey = "#cfcfcf"
+    return {
+        "picture": "background.jpg",
+        "size": list(size),
+        "alignX": screen.align_x,
+        "space": list(screen.space),
+        "accent": screen.accent,
+        "band0": _rgba(screen.accent, 0.0),
+        "band": _rgba(screen.accent, 0.8),
+        "bandEnd": _rgba(screen.accent, 0.35),
+        "grey0": _rgba(grey, 0.0),
+        "grey": _rgba(grey, 0.55),
+        "greyEnd": _rgba(grey, 0.2),
+        "glow": _rgba(screen.orb[1], 0.35),
+        "orbTop": screen.orb[0],
+        "orbBottom": screen.orb[1],
+        "roundOrb": screen.round_orb,
     }
-    if picture_dark and not pal.dark:
-        # A light variant over a dark picture: everything outside the input
-        # fields switches to the variant's always-dark set, so the screen reads
-        # like the navy menus of the first game instead of washing the picture out.
-        colors.update(
-            base=pal.complementary,
-            scrim=pal.complementary_alt,
-            scrimOpacity=0.3,
-            text=pal.complementary_text,
-            textDim=mix(pal.complementary_text, pal.complementary, 0.3),
-            ornament=pal.ornament,
-            glass=_rgba(pal.complementary, 0.82),
-            negative=mix(pal.negative, WHITE, 0.45),
-            neutral=mix(pal.neutral, WHITE, 0.25),
-        )
-    elif pal.dark and not picture_dark:
-        # A dark variant over a bright picture keeps its light text; the wash has to carry it.
-        colors["scrimOpacity"] = max(colors["scrimOpacity"], 0.62)
-        log.info("sddm", "bright picture under a dark variant; wash strengthened", variant=pal.key)
-    return colors
 
 
-def _picture(out: Path, pal: Palette, size: tuple[int, int] = (1920, 1080)) -> Path | None:
-    """The variant's built default picture, or None while its wallpapers are not built.
-
-    While one variant is being built the other's picture may not exist yet;
-    that is expected, so it is not reported as a failure here.
-    """
-    path = (out / "wallpapers" / wallpapers.default_for(pal).package_id / "contents" / "images"
-            / f"{size[0]}x{size[1]}.jpg")
-    return path if path.is_file() else None
-
-
-def main_qml(out: Path, pal: Palette) -> str:
-    picture = _picture(out, pal)
-    if picture is None:
-        log.info("sddm", "default picture is not built yet; login colours assume the variant's own tone", variant=pal.key)
-    variants = {pal.key: _variant_colors(pal, picture)}
-    return MAIN_QML % {"variants": json.dumps(variants, indent=8, ensure_ascii=False), "fallback": pal.key}
+def main_qml(pal: Palette, size: tuple[int, int]) -> str:
+    return MAIN_QML.replace("@CONFIG@", json.dumps(config(pal, size), indent=8))
 
 
 def metadata(pal: Palette) -> str:
@@ -481,7 +455,7 @@ Description={pal.title} ({tone}) login screen
 Author=Kingdom Hearts Plasma theme
 License=Fan project; artwork (c) Disney / Square Enix
 Type=sddm-theme
-Version=2.1
+Version=2.2
 Screenshot=preview.jpg
 MainScript=Main.qml
 ConfigFile=theme.conf
@@ -497,18 +471,59 @@ variant={pal.key}
 """
 
 
-def _run(cmd: list[str], what: str) -> None:
+def render_preview(root: Path, target: Path) -> bool:
+    """Draw the login screen as SDDM would show it, for the theme chooser.
+
+    Rendered off screen with PyQt6 against stand-ins for SDDM's objects;
+    False when that is not possible here.
+    """
+    if not HARNESS.is_file():
+        log.warn("sddm", "preview harness missing; the chooser shows the picture alone", expected=str(HARNESS))
+        return False
+    script = (
+        "import sys\n"
+        "from PyQt6.QtCore import QTimer, QUrl\n"
+        "from PyQt6.QtGui import QGuiApplication\n"
+        "from PyQt6.QtQuick import QQuickView\n"
+        "harness, main, out, w, h, settle = sys.argv[1:]\n"
+        "app = QGuiApplication(sys.argv[:1])\n"
+        "view = QQuickView()\n"
+        "view.setInitialProperties({'main': QUrl.fromLocalFile(main).toString(), 'width': int(w), 'height': int(h)})\n"
+        "view.setSource(QUrl.fromLocalFile(harness))\n"
+        "if view.status() != QQuickView.Status.Ready:\n"
+        "    print([e.toString() for e in view.errors()], file=sys.stderr); sys.exit(3)\n"
+        "view.resize(int(w), int(h)); view.show()\n"
+        "def grab():\n"
+        "    image = view.grabWindow()\n"
+        "    sys.exit(0 if not image.isNull() and image.save(out, quality=90) else 4)\n"
+        "QTimer.singleShot(int(settle), grab)\n"
+        "app.exec()\n"
+    )
+    # The software renderer needs no GPU, so package builds and CI draw it too.
+    # Qt sends warnings to the journal when stderr is not a terminal; they are
+    # read here instead.
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", QT_QUICK_BACKEND="software", QT_FORCE_STDERR_LOGGING="1")
+    started = time.monotonic()
     try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
-    except FileNotFoundError as exc:
-        log.error("sddm", f"{what}: tool is not installed", error=exc, command=cmd[0])
-        raise
+        result = subprocess.run([sys.executable, "-c", script, str(HARNESS), str(root / "Main.qml"), str(target),
+                                 str(PREVIEW_SIZE[0]), str(PREVIEW_SIZE[1]), str(PREVIEW_SETTLE_MS)],
+                                env=env, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired as exc:
-        log.error("sddm", f"{what} timed out", error=exc, command=cmd[0])
-        raise
-    except subprocess.CalledProcessError as exc:
-        log.error("sddm", f"{what} failed", error=exc, command=cmd[0], stderr=exc.stderr[-1500:])
-        raise
+        log.warn("sddm", "preview render timed out; the chooser shows the picture alone", error=exc)
+        return False
+    if result.returncode != 0 or not target.is_file():
+        log.warn("sddm", "preview render failed; the chooser shows the picture alone",
+                 exit_code=result.returncode, stderr=result.stderr.strip()[-1200:],
+                 hint="PyQt6 (python-pyqt6) draws the real screen")
+        return False
+    errors = [line for line in result.stderr.splitlines() if "qml" in line.lower() and ("error" in line.lower()
+                                                                                       or "warning" in line.lower())]
+    if errors:
+        # A warning here (a broken binding, a missing file) is a fault in the screen itself.
+        log.warn("sddm", "the login screen reported QML problems while rendering", messages=errors[:10])
+        return False
+    log.info("sddm", "preview rendered", target=str(target), duration_ms=round((time.monotonic() - started) * 1000))
+    return True
 
 
 def build(out: Path, pal: Palette) -> Path:
@@ -518,25 +533,23 @@ def build(out: Path, pal: Palette) -> Path:
         shutil.rmtree(legacy)
         log.info("sddm", "removed the combined login theme of an older layout", path=str(legacy))
     with log.timed("sddm", "build login theme", variant=pal.key, target=str(root)):
-        wallpaper = wallpapers.default_image(out, pal)
-        write_text(root / "Main.qml", main_qml(out, pal))
-        write_text(root / "metadata.desktop", metadata(pal))
-        write_text(root / "theme.conf", theme_conf(pal))
-        assets = root / "assets"
-        assets.mkdir(parents=True, exist_ok=True)
+        picture = ASSETS / "title" / SCREENS[pal.key].picture
         font = FONTS / FONT
-        # The emblem alone: a full logo does not read over a detailed picture.
-        mark = ASSETS / "reference" / pal.launcher_art
-        for needed in (font, mark):
+        for needed in (picture, font):
             if not needed.is_file():
                 log.error("sddm", "asset is missing", path=str(needed))
                 raise FileNotFoundError(needed)
+        if root.exists():
+            shutil.rmtree(root)
+        assets = root / "assets"
+        assets.mkdir(parents=True)
+        shutil.copyfile(picture, assets / "background.jpg")
         shutil.copyfile(font, assets / FONT)
-        _run(
-            ["magick", str(mark), "-trim", "+repage", "-resize", "600x600>", f"PNG32:{assets / f'emblem-{pal.key}.png'}"],
-            "emblem",
-        )
-        for target in (assets / f"background-{pal.key}.jpg", root / "preview.jpg"):
-            shutil.copyfile(wallpaper, target)
+        write_text(root / "Main.qml", main_qml(pal, _picture_size(picture)))
+        write_text(root / "metadata.desktop", metadata(pal))
+        write_text(root / "theme.conf", theme_conf(pal))
+        preview = root / "preview.jpg"
+        if not render_preview(root, preview):
+            shutil.copyfile(picture, preview)
         log.info("sddm", "login theme staged (install needs root: ./install.py sddm)", variant=pal.key)
     return root

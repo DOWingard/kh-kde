@@ -72,7 +72,8 @@ same meaning, the menu and title **fonts**, and an **SDDM login theme**.
 - For the keyblade menu: `cmake` and a C++20 compiler, with the Qt 6, KDE
   Frameworks (KConfig, KCoreAddons) and Plasma (libplasma) development files.
   On Arch Linux these come with the regular packages
-- PyQt6, only for `tools/preview.py`
+- PyQt6 with Qt Quick (`python-pyqt6`, `qt6-declarative`) to draw the login screens'
+  preview for System Settings, and for `tools/preview.py`
 
 ## Installing from the AUR
 
@@ -321,10 +322,27 @@ sudo rm -r /usr/share/sddm/themes/KingdomHearts-* /usr/local/lib/kingdom-hearts-
 Select another login theme first; SDDM falls back to its built-in one if the
 selected theme is missing.
 
-The login screen is fitted to each variant's default picture at build time: the
-clock and login card stand over the calmest of the left, middle and right
-thirds, and the text turns light when the picture is dark, whichever variant it
-belongs to.
+Each login screen is a title-screen wallpaper with the sign-in drawn as the
+games' title menu: a column of bars, each with a square marker, the chosen one
+lit (an orange orb for Sora, a gold light for Organization XIII) and its bar
+filled with the accent colour. Organization XIII shows the *358/2 Days*
+wallpaper with the menu in the middle of the white space on the left; Sora
+shows the *Kingdom Hearts II* one with the menu centred in the white space at
+the top left. The picture is always shown whole; on a screen of another shape
+the white around it continues and the menu stays in the empty part.
+
+The rows are **Name**, **Password**, **Log In**, **Session** and **Power**.
+Up and Down (or Tab) move between them, Enter uses one (on the name it moves to
+the password; on the password it logs in), and Left and Right change the
+session or the power action. A click picks a row; a click on the picked row
+uses it, so Shut Down needs two clicks. Above the menu, where a title screen
+credits its developer, the computer's name is shown under "Welcome to", which
+changes to "Login failed", "Caps Lock is on" or a message from SDDM when there
+is one.
+
+The picture in System Settings' Login Screen page is the real screen: the
+build draws it off screen with PyQt6 (falling back to the bare wallpaper when
+PyQt6 is missing, with a warning).
 
 ### Terminal
 
