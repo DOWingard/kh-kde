@@ -322,23 +322,28 @@ sudo rm -r /usr/share/sddm/themes/KingdomHearts-* /usr/local/lib/kingdom-hearts-
 Select another login theme first; SDDM falls back to its built-in one if the
 selected theme is missing.
 
-Each login screen is a title-screen wallpaper with the sign-in drawn as the
-games' title menu: a column of bars, each with a square marker, the chosen one
-lit (an orange orb for Sora, a gold light for Organization XIII) and its bar
-filled with the accent colour. Organization XIII shows the *358/2 Days*
-wallpaper with the menu in the middle of the white space on the left; Sora
-shows the *Kingdom Hearts II* one with the menu centred in the white space at
-the top left. The picture is always shown whole; on a screen of another shape
-the white around it continues and the menu stays in the empty part.
+Each login screen is a title-screen wallpaper with the sign-in drawn as that
+game's title menu: a column of bars, each with a square marker, the chosen one
+lit and its bar filled with colour. Organization XIII shows the *358/2 Days*
+wallpaper with the menu in the middle of the white space on the left, in the
+*358/2 Days* style: large, tightly set lettering, a glowing yellow square, a
+thick black rule and a red bar. Sora shows the *Kingdom Hearts II* wallpaper
+with the menu centred in the white space at the top left, in the
+*Kingdom Hearts II Final Mix* style: widely spaced lettering, an ember-like orb,
+a thin rule that fades out and an orange bar. The picture is always shown
+whole; on a screen of another shape the white around it continues and the menu
+stays in the empty part.
 
-The rows are **Name**, **Password**, **Log In**, **Session** and **Power**.
-Up and Down (or Tab) move between them, Enter uses one (on the name it moves to
-the password; on the password it logs in), and Left and Right change the
-session or the power action. A click picks a row; a click on the picked row
-uses it, so Shut Down needs two clicks. Above the menu, where a title screen
-credits its developer, the computer's name is shown under "Welcome to", which
-changes to "Login failed", "Caps Lock is on" or a message from SDDM when there
-is one.
+The rows are **LOGIN** (the user name), **PASSWORD**, **START**, the session
+and the power action. The two fields show their caption until something is
+typed, and the name is not filled in for you. Up and Down (or Tab) move between
+rows, Enter uses one (on the name it moves to the password; on the password or
+START it logs in), and Left and Right change the session or the power action.
+Session names drop a trailing "(Wayland)". A click picks a row; a click on the
+picked row uses it, so Shut Down needs two clicks. Above the menu, where a
+title screen credits its developer, the computer's name is shown under
+"Welcome to", which changes to "Login failed", "Caps Lock is on" or a message
+from SDDM when there is one.
 
 The picture in System Settings' Login Screen page is the real screen: the
 build draws it off screen with PyQt6 (falling back to the bare wallpaper when

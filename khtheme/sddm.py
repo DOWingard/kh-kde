@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -39,6 +40,49 @@ LEGACY_ID = THEME_ID
 
 
 @dataclass(frozen=True)
+class Menu:
+    """How one game's title menu is drawn."""
+
+    letter_spacing: float  # em
+    text_scale: float  # letter size against the bar's height
+    row_gap: float  # gap between bars against the bar's height
+    shadow: tuple[str, float]  # chosen row's drop shadow: colour, offset in units
+    rule: str  # chosen row's rule: "fade" (thin, greying out) or "solid" (thick, full length)
+    band: tuple[str, str]  # chosen row's band: colour where it starts showing, colour at the end
+    grey_band: str  # band behind the other rows, at its end
+    credit: tuple[str, str, bool]  # greeting colour, computer-name colour, bold greeting
+    marker: list[str]  # ImageMagick drawing of the lit marker on a 128 px square
+
+
+# Kingdom Hearts II Final Mix: spaced-out lettering, an ember-like round light,
+# a thin rule that fades to grey, an orange band.
+KH2_MENU = Menu(
+    letter_spacing=0.3, text_scale=0.64, row_gap=0.42, shadow=("#a9a9a9", 2.5), rule="fade",
+    band=("#f6c9a6", "#e2603a"), grey_band="#b9b9b9", credit=("#a5a5a5", "#b3b3b3", False),
+    marker=["xc:#140b03",
+            "(", "-size", "128x128", "xc:none", "-fill", "#ff8c12", "-draw", "circle 64,64 64,20", "-blur", "0x13", ")",
+            "-composite",
+            "(", "-size", "128x128", "xc:none", "-fill", "#ffd25a", "-draw", "circle 64,64 64,40", "-blur", "0x9", ")",
+            "-composite",
+            "(", "-size", "128x128", "xc:none", "-fill", "#fff8dc", "-draw", "circle 64,64 64,52", "-blur", "0x6", ")",
+            "-composite"],
+)
+# 358/2 Days: large, tight lettering, a glowing rounded square, a thick black
+# rule across the whole bar, a red band.
+DAYS_MENU = Menu(
+    letter_spacing=0.06, text_scale=0.8, row_gap=0.22, shadow=("#9c9c9c", 2.0), rule="solid",
+    band=("#eeb0b0", "#c9262e"), grey_band="#bdbdbd", credit=("#5c5c5c", "#7d7d7d", True),
+    marker=["xc:#1c1402",
+            "(", "-size", "128x128", "xc:none", "-fill", "#ff9a10", "-draw", "roundrectangle 18,18 110,110 16,16",
+            "-blur", "0x9", ")", "-composite",
+            "(", "-size", "128x128", "xc:none", "-fill", "#ffd23c", "-draw", "roundrectangle 26,26 102,102 12,12",
+            "-blur", "0x2", ")", "-composite",
+            "(", "-size", "128x128", "xc:none", "-fill", "#fff0a0", "-draw", "roundrectangle 34,34 94,94 10,10",
+            "-blur", "0x5", ")", "-composite"],
+)
+
+
+@dataclass(frozen=True)
 class Screen:
     picture: str  # file under assets/title
     # Horizontal place of the picture when the screen is wider than it
@@ -48,16 +92,14 @@ class Screen:
     # picture (left, top, right, bottom). An edge on the picture's border
     # carries on to the screen's edge, so extra white beside the picture counts.
     space: tuple[float, float, float, float]
-    accent: str  # band behind the chosen row
-    orb: tuple[str, str]  # top and bottom colour of the light in the marker
-    round_orb: bool
+    menu: Menu
 
 
 SCREENS = {
     # 358/2 Days: logo top left, painting on the right running off the edge.
-    ORG_XIII.key: Screen("days.jpg", 1.0, (0.0, 0.26, 0.43, 1.0), "#d0262c", ("#fff6b8", "#f2b705"), False),
+    ORG_XIII.key: Screen("days.jpg", 1.0, (0.0, 0.26, 0.43, 1.0), DAYS_MENU),
     # Kingdom Hearts II: painting top right, logo bottom left, white all round.
-    SORA.key: Screen("kh2.jpg", 0.5, (0.0, 0.0, 0.37, 0.62), "#ec5a24", ("#fff1b0", "#f07800"), True),
+    SORA.key: Screen("kh2.jpg", 0.5, (0.0, 0.0, 0.37, 0.62), KH2_MENU),
 }
 
 
@@ -91,9 +133,11 @@ Rectangle {
     // Menu scale: 1 on a 1080-line screen, smaller when the empty part is too small.
     readonly property real u: Math.max(0.4, Math.min(height / 1080, (spaceR - spaceL) * 0.88 / 620,
                                                      (spaceB - spaceT) * 0.92 / 560))
+    readonly property int barHeight: Math.round(60 * u)
+    readonly property int textSize: Math.round(barHeight * c.textScale)
 
-    readonly property var rows: [nameRow, passRow, loginRow, sessionRow, powerRow]
-    property int current: userModel.lastUser ? 1 : 0
+    readonly property var rows: [nameRow, passRow, startRow, sessionRow, powerRow]
+    property int current: 0
     property int sessionIndex: sessionModel.lastIndex >= 0 ? sessionModel.lastIndex : 0
     property int powerIndex: 0
     property bool failed: false
@@ -157,7 +201,6 @@ Rectangle {
     component MenuRow: FocusScope {
         id: row
         property int index: 0
-        property string caption: ""
         property Item input: null
         readonly property bool selected: root.current === index
         default property alias content: slot.data
@@ -165,74 +208,66 @@ Rectangle {
         signal cycled(int step)
         function takeFocus() { if (input) input.forceActiveFocus(); else row.forceActiveFocus(); }
         width: Math.round(620 * root.u)
-        height: Math.round(60 * root.u)
-        activeFocusOnTab: false
+        height: root.barHeight
 
         // The square marker; the chosen row's holds a light.
         Rectangle {
             id: marker
             width: row.height; height: row.height
-            color: row.selected ? "#151515" : "#c8c8c8"
-            Behavior on color { ColorAnimation { duration: 120 } }
-            Rectangle {
-                anchors.centerIn: parent
+            color: "#c4c4c4"
+            Image {
+                anchors.fill: parent
                 visible: row.selected
-                width: parent.width * 0.8; height: width
-                radius: root.c.roundOrb ? width / 2 : width * 0.22
-                color: root.c.glow
-            }
-            Rectangle {
-                anchors.centerIn: parent
-                visible: row.selected
-                width: parent.width * 0.52; height: width
-                radius: root.c.roundOrb ? width / 2 : width * 0.18
-                gradient: Gradient {
-                    GradientStop { position: 0.0; color: root.c.orbTop }
-                    GradientStop { position: 1.0; color: root.c.orbBottom }
-                }
+                source: "assets/marker.png"
+                smooth: true
             }
         }
-        // The bar: a band that deepens toward its end, and a rule beneath.
+        // The band toward the bar's end.
         Rectangle {
-            id: bar
-            x: marker.width + Math.round(6 * root.u)
+            x: marker.width
             width: row.width - x
-            height: row.height
+            height: row.height - rule.height
             gradient: Gradient {
                 orientation: Gradient.Horizontal
                 GradientStop { position: 0.0; color: row.selected ? root.c.band0 : root.c.grey0 }
-                GradientStop { position: 0.5; color: row.selected ? root.c.band0 : root.c.grey0 }
-                GradientStop { position: 0.85; color: row.selected ? root.c.band : root.c.grey }
+                GradientStop { position: 0.52; color: row.selected ? root.c.band0 : root.c.grey0 }
+                GradientStop { position: 0.72; color: row.selected ? root.c.bandMid : root.c.greyMid }
                 GradientStop { position: 1.0; color: row.selected ? root.c.bandEnd : root.c.greyEnd }
             }
-            Rectangle {
-                anchors.bottom: parent.bottom
-                x: -marker.width - Math.round(6 * root.u)
-                width: row.width
-                height: Math.max(2, Math.round((row.selected ? 4 : 3) * root.u))
-                gradient: Gradient {
-                    orientation: Gradient.Horizontal
-                    GradientStop { position: 0.0; color: row.selected ? "#151515" : "#c8c8c8" }
-                    GradientStop { position: 0.75; color: row.selected ? "#151515" : "#d8d8d8" }
-                    GradientStop { position: 1.0; color: row.selected ? "#00151515" : "#00d8d8d8" }
-                }
-            }
-            Text {
-                anchors.right: parent.right
-                anchors.rightMargin: Math.round(12 * root.u)
-                anchors.verticalCenter: parent.verticalCenter
-                text: row.caption
-                color: row.selected ? "#ffffff" : "#a5a5a5"
-                font.family: menuFont.name
-                font.pixelSize: Math.round(15 * root.u)
-                font.letterSpacing: Math.round(3 * root.u)
+        }
+        // The rule under the bar.
+        Rectangle {
+            id: rule
+            anchors.bottom: parent.bottom
+            x: marker.width
+            width: row.width - x
+            height: Math.max(2, Math.round((row.selected && root.c.rule === "solid" ? 5 : 3) * root.u))
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: row.selected ? "#141414" : "#cdcdcd" }
+                GradientStop { position: 0.55; color: row.selected ? (root.c.rule === "solid" ? "#141414" : "#5a5a5a") : "#d2d2d2" }
+                GradientStop { position: 1.0; color: row.selected ? (root.c.rule === "solid" ? "#141414" : "#c8c8c8") : "#dcdcdc" }
             }
         }
+        // A soft second line under a fading rule.
+        Rectangle {
+            visible: row.selected && root.c.rule === "fade"
+            anchors.top: rule.bottom
+            x: rule.x
+            width: rule.width * 0.8
+            height: rule.height
+            gradient: Gradient {
+                orientation: Gradient.Horizontal
+                GradientStop { position: 0.0; color: "#d0d0d0" }
+                GradientStop { position: 1.0; color: "#00d0d0d0" }
+            }
+        }
+        // Lettering stays clear of the band, as on the title screens.
         Item {
             id: slot
-            x: marker.width + Math.round(24 * root.u)
-            width: row.width - x - Math.round(110 * root.u)
-            height: row.height
+            x: marker.width + Math.round(20 * root.u)
+            width: Math.round((row.width - marker.width) * 0.66) - Math.round(20 * root.u)
+            height: row.height - rule.height
         }
         // A click picks a row; a click on the picked row uses it.
         MouseArea {
@@ -256,35 +291,76 @@ Rectangle {
         }
     }
 
-    // The menu's lettering: dark and outlined in white on the chosen row,
-    // pale grey and engraved on the others.
-    component RowText: Text {
+    // The menu's lettering: black over a grey drop shadow on the chosen row,
+    // flat pale grey on the others.
+    component RowText: Item {
+        id: label
         property bool selected: false
-        anchors.verticalCenter: parent ? parent.verticalCenter : undefined
-        color: selected ? "#141414" : "#c6c6c6"
-        style: Text.Outline
-        styleColor: selected ? "#ffffff" : "#a2a2a2"
-        font.family: menuFont.name
-        font.pixelSize: Math.round(40 * root.u)
-        font.letterSpacing: Math.round(4 * root.u)
-        // Long values (session names) shrink to fit their bar.
-        fontSizeMode: Text.HorizontalFit
-        minimumPixelSize: Math.round(20 * root.u)
-        elide: Text.ElideRight
-        width: parent ? parent.width : implicitWidth
+        property string text: ""
+        anchors.fill: parent
+        Text {
+            id: shadow
+            visible: label.selected
+            x: Math.round(root.c.shadowOffset * root.u)
+            y: Math.round(root.c.shadowOffset * root.u)
+            width: parent.width; height: parent.height
+            verticalAlignment: Text.AlignVCenter
+            text: label.text
+            color: root.c.shadow
+            font: face.font
+            fontSizeMode: face.fontSizeMode
+            minimumPixelSize: face.minimumPixelSize
+            elide: Text.ElideRight
+        }
+        Text {
+            id: face
+            width: parent.width; height: parent.height
+            verticalAlignment: Text.AlignVCenter
+            text: label.text
+            color: label.selected ? "#121212" : "#c9c9c9"
+            font.family: menuFont.name
+            font.pixelSize: root.textSize
+            // Spacing does not shrink with the letters, so long values get less of it.
+            font.letterSpacing: root.textSize * root.c.letterSpacing * Math.min(1, 9 / Math.max(1, label.text.length))
+            // Long values (session names) shrink to fit their bar.
+            fontSizeMode: Text.HorizontalFit
+            minimumPixelSize: Math.round(root.textSize * 0.35)
+            elide: Text.ElideRight
+        }
     }
 
-    component RowInput: TextInput {
+    // A field typed into: what is typed takes the menu's lettering, and its
+    // label shows while it is empty.
+    component RowInput: Item {
+        id: field
         property bool selected: false
-        anchors.verticalCenter: parent.verticalCenter
-        width: parent.width
-        clip: true
-        color: selected ? "#141414" : "#c6c6c6"
-        selectionColor: root.c.accent
-        selectedTextColor: "#ffffff"
-        font.family: menuFont.name
-        font.pixelSize: Math.round(40 * root.u)
-        font.letterSpacing: Math.round(4 * root.u)
+        property string label: ""
+        property alias input: editor
+        anchors.fill: parent
+        RowText { selected: field.selected; visible: editor.text.length === 0; text: field.label }
+        Text {
+            visible: field.selected && editor.text.length > 0
+            x: Math.round(root.c.shadowOffset * root.u)
+            y: Math.round(root.c.shadowOffset * root.u)
+            width: parent.width; height: parent.height
+            verticalAlignment: Text.AlignVCenter
+            clip: true
+            text: editor.displayText
+            color: root.c.shadow
+            font: editor.font
+        }
+        TextInput {
+            id: editor
+            width: parent.width; height: parent.height
+            verticalAlignment: TextInput.AlignVCenter
+            clip: true
+            color: field.selected ? "#121212" : "#c9c9c9"
+            selectionColor: root.c.accent
+            selectedTextColor: "#ffffff"
+            font.family: menuFont.name
+            font.pixelSize: root.textSize
+            font.letterSpacing: root.textSize * root.c.letterSpacing
+        }
     }
 
     Column {
@@ -292,45 +368,48 @@ Rectangle {
         x: Math.round((root.spaceL + root.spaceR - width) / 2)
         y: Math.round((root.spaceT + root.spaceB - height) / 2)
         width: Math.round(620 * root.u)
-        spacing: Math.round(30 * root.u)
+        spacing: Math.round(26 * root.u)
 
         // Where the title screen credits its developer: a greeting, or what went wrong.
         Item {
             width: menu.width
-            height: Math.round(92 * root.u)
+            height: Math.round(76 * root.u)
             Text {
                 id: small
                 x: Math.round(14 * root.u)
                 text: root.failed ? "Login failed" : root.busy ? "Logging in" : root.notice.length > 0 ? root.notice
                       : keyboard.capsLock ? "Caps Lock is on" : "Welcome to"
-                color: root.failed ? root.c.accent : "#8e8e8e"
+                color: root.failed ? root.c.accent : root.c.greeting
                 font.family: menuFont.name
-                font.pixelSize: Math.round(22 * root.u)
-                font.letterSpacing: Math.round(4 * root.u)
+                font.bold: root.c.greetingBold
+                font.pixelSize: Math.round(20 * root.u)
+                font.letterSpacing: Math.round(20 * root.u) * root.c.letterSpacing * 0.8
                 font.capitalization: Font.AllUppercase
                 width: menu.width - x
                 elide: Text.ElideRight
             }
             Rectangle {
                 anchors.top: small.bottom
-                anchors.topMargin: Math.round(6 * root.u)
+                anchors.topMargin: Math.round(3 * root.u)
+                x: -Math.round(40 * root.u)
                 width: Math.round(menu.width * 0.5)
-                height: Math.max(1, Math.round(2 * root.u))
+                height: Math.max(1, Math.round(3 * root.u))
                 gradient: Gradient {
                     orientation: Gradient.Horizontal
-                    GradientStop { position: 0.0; color: "#b4b4b4" }
-                    GradientStop { position: 0.7; color: "#b4b4b4" }
-                    GradientStop { position: 1.0; color: "#00b4b4b4" }
+                    GradientStop { position: 0.0; color: "#00a0a0a0" }
+                    GradientStop { position: 0.15; color: "#a0a0a0" }
+                    GradientStop { position: 0.7; color: "#c4c4c4" }
+                    GradientStop { position: 1.0; color: "#00c4c4c4" }
                 }
             }
             Text {
-                x: Math.round(28 * root.u)
+                x: Math.round(32 * root.u)
                 anchors.bottom: parent.bottom
                 text: sddm.hostName
-                color: "#a7a7a7"
+                color: root.c.hostName
                 font.family: menuFont.name
-                font.pixelSize: Math.round(34 * root.u)
-                font.letterSpacing: Math.round(6 * root.u)
+                font.pixelSize: Math.round(30 * root.u)
+                font.letterSpacing: Math.round(30 * root.u) * root.c.letterSpacing * 0.8
                 font.capitalization: Font.AllUppercase
                 width: menu.width - x
                 elide: Text.ElideRight
@@ -338,56 +417,44 @@ Rectangle {
         }
 
         Column {
-            spacing: Math.round(16 * root.u)
+            spacing: Math.round(root.barHeight * root.c.rowGap)
 
             MenuRow {
                 id: nameRow
                 index: 0
-                caption: "NAME"
-                input: nameInput
+                input: nameField.input
                 onActivated: root.select(1)
-                RowText { selected: nameRow.selected; visible: nameInput.text.length === 0; text: "NAME" }
-                // Shown in capitals like the rest of the menu; what is typed is kept as typed.
-                RowInput { id: nameInput; selected: nameRow.selected; text: userModel.lastUser; font.capitalization: Font.AllUppercase }
+                RowInput { id: nameField; selected: nameRow.selected; label: "LOGIN" }
             }
             MenuRow {
                 id: passRow
                 index: 1
-                caption: "PASSWORD"
-                input: passInput
+                input: passField.input
                 onActivated: root.login()
-                RowText { selected: passRow.selected; visible: passInput.text.length === 0; text: "PASSWORD" }
-                RowInput {
-                    id: passInput
-                    selected: passRow.selected
-                    echoMode: TextInput.Password
-                    passwordCharacter: "•"
-                    onTextChanged: if (text.length > 0) root.failed = false
-                }
+                RowInput { id: passField; selected: passRow.selected; label: "PASSWORD" }
             }
             MenuRow {
-                id: loginRow
+                id: startRow
                 index: 2
                 onActivated: root.login()
-                RowText { selected: loginRow.selected; text: "LOG IN" }
+                RowText { selected: startRow.selected; text: "START" }
             }
             MenuRow {
                 id: sessionRow
                 index: 3
-                caption: "SESSION"
                 readonly property var item: sessions.count > 0 ? sessions.itemAt(root.sessionIndex % sessions.count) : null
+                // Wayland is the usual session, so only other kinds keep their suffix.
+                readonly property string name: (item ? item.sessionName : "Default").replace(/\s*\(Wayland\)\s*$/i, "").toUpperCase()
                 onActivated: cycled(1)
                 onCycled: (step) => { if (sessions.count > 0) root.sessionIndex = (root.sessionIndex + step + sessions.count) % sessions.count; }
                 RowText {
                     selected: sessionRow.selected
-                    text: (sessionRow.selected ? "‹ " : "") + (sessionRow.item ? sessionRow.item.sessionName : "Default").toUpperCase()
-                          + (sessionRow.selected ? " ›" : "")
+                    text: (sessionRow.selected ? "‹ " : "") + sessionRow.name + (sessionRow.selected ? " ›" : "")
                 }
             }
             MenuRow {
                 id: powerRow
                 index: 4
-                caption: "POWER"
                 visible: root.powers.length > 0
                 onActivated: root.power()
                 onCycled: (step) => { root.powerIndex = (root.powerIndex + step + root.powers.length) % root.powers.length; }
@@ -399,6 +466,10 @@ Rectangle {
             }
         }
     }
+
+    // The typed fields, reached by id from the functions above.
+    readonly property alias nameInput: nameField.input
+    readonly property alias passInput: passField.input
 
     Component.onCompleted: rows[current].takeFocus()
 }
@@ -421,25 +492,42 @@ def _picture_size(path: Path) -> tuple[int, int]:
     return w, h
 
 
+def _draw_marker(menu: Menu, target: Path) -> None:
+    cmd = ["magick", "-size", "128x128", *menu.marker, str(target)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=60)
+    except subprocess.TimeoutExpired as exc:
+        log.error("sddm", "drawing the menu marker timed out", error=exc)
+        raise
+    except subprocess.CalledProcessError as exc:
+        log.error("sddm", "drawing the menu marker failed", error=exc, stderr=exc.stderr.decode(errors="replace")[-800:])
+        raise
+
+
 def config(pal: Palette, size: tuple[int, int]) -> dict:
     screen = SCREENS[pal.key]
-    grey = "#cfcfcf"
+    menu = screen.menu
     return {
         "picture": "background.jpg",
         "size": list(size),
         "alignX": screen.align_x,
         "space": list(screen.space),
-        "accent": screen.accent,
-        "band0": _rgba(screen.accent, 0.0),
-        "band": _rgba(screen.accent, 0.8),
-        "bandEnd": _rgba(screen.accent, 0.35),
-        "grey0": _rgba(grey, 0.0),
-        "grey": _rgba(grey, 0.55),
-        "greyEnd": _rgba(grey, 0.2),
-        "glow": _rgba(screen.orb[1], 0.35),
-        "orbTop": screen.orb[0],
-        "orbBottom": screen.orb[1],
-        "roundOrb": screen.round_orb,
+        "letterSpacing": menu.letter_spacing,
+        "textScale": menu.text_scale,
+        "rowGap": menu.row_gap,
+        "shadow": menu.shadow[0],
+        "shadowOffset": menu.shadow[1],
+        "rule": menu.rule,
+        "accent": menu.band[1],
+        "band0": _rgba(menu.band[0], 0.0),
+        "bandMid": _rgba(menu.band[0], 0.9),
+        "bandEnd": menu.band[1],
+        "grey0": _rgba(menu.grey_band, 0.0),
+        "greyMid": _rgba(menu.grey_band, 0.45),
+        "greyEnd": menu.grey_band,
+        "greeting": menu.credit[0],
+        "hostName": menu.credit[1],
+        "greetingBold": menu.credit[2],
     }
 
 
@@ -455,7 +543,7 @@ Description={pal.title} ({tone}) login screen
 Author=Kingdom Hearts Plasma theme
 License=Fan project; artwork (c) Disney / Square Enix
 Type=sddm-theme
-Version=2.2
+Version=2.3
 Screenshot=preview.jpg
 MainScript=Main.qml
 ConfigFile=theme.conf
@@ -516,8 +604,10 @@ def render_preview(root: Path, target: Path) -> bool:
                  exit_code=result.returncode, stderr=result.stderr.strip()[-1200:],
                  hint="PyQt6 (python-pyqt6) draws the real screen")
         return False
-    errors = [line for line in result.stderr.splitlines() if "qml" in line.lower() and ("error" in line.lower()
-                                                                                       or "warning" in line.lower())]
+    # Qt prefixes every QML diagnostic (errors, binding loops, type errors) with
+    # the file and line it concerns.
+    errors = [line for line in result.stderr.splitlines()
+              if re.search(r"\.qml:\d+", line) or ("qml" in line.lower() and "error" in line.lower())]
     if errors:
         # A warning here (a broken binding, a missing file) is a fault in the screen itself.
         log.warn("sddm", "the login screen reported QML problems while rendering", messages=errors[:10])
@@ -545,6 +635,7 @@ def build(out: Path, pal: Palette) -> Path:
         assets.mkdir(parents=True)
         shutil.copyfile(picture, assets / "background.jpg")
         shutil.copyfile(font, assets / FONT)
+        _draw_marker(SCREENS[pal.key].menu, assets / "marker.png")
         write_text(root / "Main.qml", main_qml(pal, _picture_size(picture)))
         write_text(root / "metadata.desktop", metadata(pal))
         write_text(root / "theme.conf", theme_conf(pal))
