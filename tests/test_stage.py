@@ -45,7 +45,8 @@ class StagedPackage(unittest.TestCase):
             share / "Kvantum" / kvantum.THEME,
             share / "sounds" / SOUND_THEME / "index.theme",
             share / "wallpapers" / "KingdomHearts" / "metadata.json",
-            share / "sddm" / "themes" / "KingdomHearts" / "Main.qml",
+            share / "sddm" / "themes" / "KingdomHearts-OrgXIII" / "Main.qml",
+            share / "sddm" / "themes" / "KingdomHearts-Sora" / "Main.qml",
             share / "fonts" / "KingdomHearts" / "KHMenu.otf",
         ]
         for pal in VARIANTS:

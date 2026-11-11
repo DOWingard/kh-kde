@@ -1,8 +1,10 @@
-"""SDDM login theme: one theme directory serving both variants.
+"""SDDM login themes: one theme directory per variant.
 
-`theme.conf` selects the variant (`variant=OrgXIII` or `variant=Sora`); the
-QML carries both colour sets and picks its background and emblem to match.
-Installing it needs root, so the build only stages it under dist/sddm.
+Each variant is its own theme (`KingdomHearts-OrgXIII`, `KingdomHearts-Sora`),
+so both appear as choices in System Settings' Login Screen page and in
+`install.py sddm`. `theme.conf` still names the variant, which the QML uses to
+pick its colours, background and emblem. Installing needs root, so the build
+only stages the themes under dist/sddm.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import subprocess
 from pathlib import Path
 
 from . import log, wallpapers
-from .palette import ORG_XIII, VARIANTS, WHITE, Palette, mix
+from .palette import WHITE, Palette, mix
 from .svg import write_text
 
 ASSETS = Path(__file__).resolve().parent.parent / "assets"
@@ -21,6 +23,12 @@ FONTS = ASSETS / "fonts"
 FONT = "KHMenuBold.otf"
 
 THEME_ID = "KingdomHearts"
+# The single theme directory earlier versions built for both variants.
+LEGACY_ID = THEME_ID
+
+
+def theme_id(pal: Palette) -> str:
+    return f"{THEME_ID}-{pal.key}"
 
 # A picture counts as dark below this mean luminance (0..1); text laid over it
 # is then light whatever the variant's own tone.
@@ -457,34 +465,35 @@ def _picture(out: Path, pal: Palette, size: tuple[int, int] = (1920, 1080)) -> P
     return path if path.is_file() else None
 
 
-def main_qml(out: Path) -> str:
-    variants = {}
-    for pal in VARIANTS:
-        picture = _picture(out, pal)
-        if picture is None:
-            log.info("sddm", "default picture is not built yet; login colours assume the variant's own tone", variant=pal.key)
-        variants[pal.key] = _variant_colors(pal, picture)
-    return MAIN_QML % {"variants": json.dumps(variants, indent=8, ensure_ascii=False), "fallback": ORG_XIII.key}
+def main_qml(out: Path, pal: Palette) -> str:
+    picture = _picture(out, pal)
+    if picture is None:
+        log.info("sddm", "default picture is not built yet; login colours assume the variant's own tone", variant=pal.key)
+    variants = {pal.key: _variant_colors(pal, picture)}
+    return MAIN_QML % {"variants": json.dumps(variants, indent=8, ensure_ascii=False), "fallback": pal.key}
 
 
-METADATA = f"""[SddmGreeterTheme]
-Name=Kingdom Hearts
-Description=Organization XIII (dark) and Sora (light) login screen
+def metadata(pal: Palette) -> str:
+    tone = "dark" if pal.dark else "light"
+    return f"""[SddmGreeterTheme]
+Name=Kingdom Hearts – {pal.title}
+Description={pal.title} ({tone}) login screen
 Author=Kingdom Hearts Plasma theme
 License=Fan project; artwork (c) Disney / Square Enix
 Type=sddm-theme
-Version=2.0
+Version=2.1
 Screenshot=preview.jpg
 MainScript=Main.qml
 ConfigFile=theme.conf
-Theme-Id={THEME_ID}
+Theme-Id={theme_id(pal)}
 Theme-API=2.0
 QtVersion=6
 """
 
-THEME_CONF = f"""[General]
-# OrgXIII (dark) or Sora (light)
-variant={ORG_XIII.key}
+
+def theme_conf(pal: Palette) -> str:
+    return f"""[General]
+variant={pal.key}
 """
 
 
@@ -503,18 +512,18 @@ def _run(cmd: list[str], what: str) -> None:
 
 
 def build(out: Path, pal: Palette) -> Path:
-    root = out / "sddm" / THEME_ID
+    root = out / "sddm" / theme_id(pal)
+    legacy = out / "sddm" / LEGACY_ID
+    if legacy.is_dir():
+        shutil.rmtree(legacy)
+        log.info("sddm", "removed the combined login theme of an older layout", path=str(legacy))
     with log.timed("sddm", "build login theme", variant=pal.key, target=str(root)):
         wallpaper = wallpapers.default_image(out, pal)
-        write_text(root / "Main.qml", main_qml(out))
-        write_text(root / "metadata.desktop", METADATA)
-        write_text(root / "theme.conf", THEME_CONF)
+        write_text(root / "Main.qml", main_qml(out, pal))
+        write_text(root / "metadata.desktop", metadata(pal))
+        write_text(root / "theme.conf", theme_conf(pal))
         assets = root / "assets"
         assets.mkdir(parents=True, exist_ok=True)
-        stale = assets / f"emblem-{pal.key}.svg"
-        if stale.exists():
-            stale.unlink()
-            log.info("sddm", "removed an emblem from an older layout", path=str(stale))
         font = FONTS / FONT
         # The emblem alone: a full logo does not read over a detailed picture.
         mark = ASSETS / "reference" / pal.launcher_art
@@ -527,10 +536,7 @@ def build(out: Path, pal: Palette) -> Path:
             ["magick", str(mark), "-trim", "+repage", "-resize", "600x600>", f"PNG32:{assets / f'emblem-{pal.key}.png'}"],
             "emblem",
         )
-        targets = [assets / f"background-{pal.key}.jpg"]
-        if pal.key == ORG_XIII.key:
-            targets.append(root / "preview.jpg")
-        for target in targets:
+        for target in (assets / f"background-{pal.key}.jpg", root / "preview.jpg"):
             shutil.copyfile(wallpaper, target)
         log.info("sddm", "login theme staged (install needs root: ./install.py sddm)", variant=pal.key)
     return root

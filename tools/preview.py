@@ -61,7 +61,7 @@ def scene_props(scene: str, pal: Palette) -> dict:
         splash = DIST / "plasma" / "look-and-feel" / pal.theme_id / "contents" / "splash" / "Splash.qml"
         return {"splash": splash.as_uri()}
     if scene == "sddm":
-        return {"main": (DIST / "sddm" / "KingdomHearts" / "Main.qml").as_uri(), "variantName": pal.key, "fail": False}
+        return {"main": (DIST / "sddm" / f"KingdomHearts-{pal.key}" / "Main.qml").as_uri(), "variantName": pal.key, "fail": False}
     raise KeyError(scene)
 
 
