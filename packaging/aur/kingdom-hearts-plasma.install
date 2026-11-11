@@ -5,6 +5,9 @@ post_install() {
       kingdom-hearts-plasma apply OrgXIII   (dark)
     `apply` also sets the sounds, the Kvantum style and the wallpaper, and
     binds Super + right click on the desktop to the keyblade browser.
+    With several screens the wallpaper is spread across them.
+    Pick "Kingdom Hearts – Sora" or "– Organization XIII" under System
+    Settings > Login Screen (SDDM); it then follows the desktop's variant.
     Before removing this package, run `kingdom-hearts-plasma revert` and
     `kingdom-hearts-plasma uninstall` to restore your previous look.
 EOF

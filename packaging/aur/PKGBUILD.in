@@ -11,6 +11,7 @@ depends=(
   'aurorae'
   'gcc-libs'
   'glibc'
+  'imagemagick'
   'kconfig'
   'kcoreaddons'
   'libplasma'
@@ -20,11 +21,12 @@ depends=(
   'qt6-base'
   'qt6-tools'
 )
-makedepends=('cmake' 'extra-cmake-modules' 'ffmpeg' 'imagemagick' 'librsvg')
+makedepends=('cmake' 'extra-cmake-modules' 'ffmpeg' 'librsvg')
 optdepends=(
   'kvantum: application style (Breeze in the theme colours without it)'
   'konsole: terminal colour schemes'
   'sddm: login screen theme'
+  'polkit: login screen that follows the desktop variant'
 )
 install=kingdom-hearts-plasma.install
 source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
