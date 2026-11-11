@@ -47,11 +47,17 @@ QList<Keyblade> catalogue(QString *error);
 // The recorded choice, or an empty string when none was made.
 QString chosen();
 
-// Rewrite the keyed cursors of every installed theme with `slug` and record it.
-Outcome equip(const QString &slug);
+// Rewrite the keyed cursors of the installed themes named in `only` (every
+// installed theme when empty) with `slug`, and record the choice.
+Outcome equip(const QString &slug, const QStringList &only = {});
 
 // The cursor theme the desktop uses now.
 QString activeCursorTheme();
+
+// Theme ids to rewrite, in turn: the active theme alone first when it is one
+// of ours, since only it changes what is on screen, then the rest. A single
+// stage holding every theme otherwise.
+QList<QStringList> equipStages();
 
 // Make the window manager drop the cursor images it holds by switching to a
 // stand-in theme and back; does nothing when the active theme is not one of

@@ -24,6 +24,9 @@
 #include <QtEndian>
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <optional>
 #include <vector>
 
@@ -373,15 +376,22 @@ bool rewriteTheme(const Keyblades::Theme &theme, const QString &slug, QString *e
         }
 
         // Written aside and renamed into place, so a running window manager
-        // never reads a half-written cursor.
-        QSaveFile file(theme.path + QStringLiteral("/cursors/") + name);
-        if (!file.open(QIODevice::WriteOnly)) {
+        // never reads a half-written cursor. Not forced to disk (QSaveFile
+        // would fsync every file): the cursors can always be written again,
+        // and on a busy disk the syncs alone took seconds.
+        const QString target = theme.path + QStringLiteral("/cursors/") + name;
+        const QString staging = theme.path + QStringLiteral("/cursors/.") + name + QStringLiteral(".kh-new");
+        QFile file(staging);
+        const QByteArray bytes = xcursorBytes(images);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate) || file.write(bytes) != bytes.size()) {
             *error = QStringLiteral("cannot write cursor %1: %2").arg(name, file.errorString());
+            file.remove();
             return false;
         }
-        file.write(xcursorBytes(images));
-        if (!file.commit()) {
-            *error = QStringLiteral("cannot write cursor %1: %2").arg(name, file.errorString());
+        file.close();
+        if (std::rename(QFile::encodeName(staging).constData(), QFile::encodeName(target).constData()) != 0) {
+            *error = QStringLiteral("cannot replace cursor %1: %2").arg(name, QString::fromLocal8Bit(std::strerror(errno)));
+            QFile::remove(staging);
             return false;
         }
         KhLog::debug(kContext, QStringLiteral("cursor rewritten"),
@@ -474,12 +484,17 @@ QString Keyblades::activeCursorTheme()
     return KConfig(QStringLiteral("kcminputrc")).group(QStringLiteral("Mouse")).readEntry("cursorTheme", kStandIn);
 }
 
-Keyblades::Outcome Keyblades::equip(const QString &slug)
+Keyblades::Outcome Keyblades::equip(const QString &slug, const QStringList &only)
 {
     QElapsedTimer timer;
     timer.start();
     Outcome outcome;
-    const QList<Theme> themes = installedThemes();
+    QList<Theme> themes = installedThemes();
+    if (!only.isEmpty()) {
+        themes.removeIf([&only](const Theme &theme) {
+            return !only.contains(theme.id);
+        });
+    }
     if (themes.isEmpty()) {
         outcome.failures.append(QStringLiteral("no Kingdom Hearts cursor theme is installed"));
         KhLog::error(kContext, QStringLiteral("cannot equip: no cursor theme with keyblades is installed"),
@@ -510,8 +525,24 @@ Keyblades::Outcome Keyblades::equip(const QString &slug)
     }
     KhLog::info(kContext, QStringLiteral("keyblade equipped"),
                 fields({{QStringLiteral("keyblade"), slug}, {QStringLiteral("themes"), outcome.rewritten},
+                        {QStringLiteral("only"), QJsonArray::fromStringList(only)},
                         {QStringLiteral("failed"), int(outcome.failures.size())}, {QStringLiteral("duration_ms"), qint64(timer.elapsed())}}));
     return outcome;
+}
+
+QList<QStringList> Keyblades::equipStages()
+{
+    QStringList ids;
+    const QList<Theme> themes = installedThemes();
+    for (const Theme &theme : themes) {
+        ids.append(theme.id);
+    }
+    const QString active = activeCursorTheme();
+    if (!ids.contains(active) || ids.size() == 1) {
+        return {ids};
+    }
+    ids.removeAll(active);
+    return {{active}, ids};
 }
 
 Keyblades::CursorReload::CursorReload(QObject *parent)

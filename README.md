@@ -241,6 +241,10 @@ From a terminal:
 The choice is kept in `~/.config/kingdom-hearts-plasmarc`, and `install`
 puts it back after replacing the cursor themes.
 
+The menu rewrites the cursor theme in use first and shows the new keyblade as
+soon as that theme is reloaded; the other variant's theme is rewritten in the
+meantime. A keyblade picked while one is still being put on follows it.
+
 To make <kbd>Super</kbd> + right-click reach the desktop, `apply` changes
 what KWin does with it. KWin's default for <kbd>Super</kbd> + right-drag is
 resizing a window, and it keeps the click from the desktop. While a variant is

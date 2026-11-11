@@ -10,6 +10,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QButtonGroup>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QFontDatabase>
 #include <QGridLayout>
@@ -26,6 +27,7 @@
 #include <QVBoxLayout>
 #include <QWidgetAction>
 
+#include <functional>
 #include <memory>
 
 namespace
@@ -251,33 +253,94 @@ private:
     void equip(const QString &slug)
     {
         if (m_busy) {
-            KhLog::warn(kContext, QStringLiteral("a keyblade is still being equipped; choice ignored"), QJsonObject{{QStringLiteral("keyblade"), slug}});
+            // Kept rather than dropped: the latest choice follows once the
+            // current one is on screen.
+            m_pending = slug;
+            KhLog::info(kContext, QStringLiteral("a keyblade is still being equipped; this choice follows it"),
+                        QJsonObject{{QStringLiteral("keyblade"), slug}, {QStringLiteral("equipping"), m_equipping}});
             return;
         }
         m_busy = true;
+        m_equipping = slug;
+        m_pending.clear();
+        m_clock.start();
         KhLog::info(kContext, QStringLiteral("keyblade chosen"), QJsonObject{{QStringLiteral("keyblade"), slug}});
-        // Rewriting every cursor of both themes takes a moment; it runs off
-        // the shell's thread so the desktop stays responsive.
-        auto outcome = std::make_shared<Keyblades::Outcome>();
-        QThread *worker = QThread::create([slug, outcome] {
-            *outcome = Keyblades::equip(slug);
-        });
-        connect(worker, &QThread::finished, this, [this, worker, slug, outcome] {
-            worker->deleteLater();
-            m_busy = false;
-            if (outcome->rewritten == 0) {
-                KhLog::error(kContext, QStringLiteral("keyblade not equipped"),
-                             QJsonObject{{QStringLiteral("keyblade"), slug}, {QStringLiteral("error"), outcome->failures.join(QStringLiteral("; "))}});
-                return;
+        // Rewriting cursors reads and writes many files; it runs off the
+        // shell's thread so the desktop stays responsive. The theme on screen
+        // is rewritten and reloaded first; the others are rewritten while it
+        // reloads, so the pointer changes after half the work.
+        auto stages = std::make_shared<QList<QStringList>>();
+        auto first = std::make_shared<Keyblades::Outcome>();
+        runOffThread([slug, stages, first] {
+            *stages = Keyblades::equipStages();
+            *first = Keyblades::equip(slug, stages->value(0));
+        }, [this, slug, stages, first] {
+            if (first->rewritten == 0) {
+                KhLog::error(kContext, QStringLiteral("keyblade not equipped on the theme in use"),
+                             QJsonObject{{QStringLiteral("keyblade"), slug}, {QStringLiteral("error"), first->failures.join(QStringLiteral("; "))}});
+            } else {
+                ++m_outstanding;
+                auto *reload = new Keyblades::CursorReload(this);
+                connect(reload, &Keyblades::CursorReload::finished, this, [this, reload, slug](bool ok) {
+                    reload->deleteLater();
+                    KhLog::info(kContext, QStringLiteral("keyblade on screen"),
+                                QJsonObject{{QStringLiteral("keyblade"), slug}, {QStringLiteral("reloaded"), ok},
+                                            {QStringLiteral("duration_ms"), qint64(m_clock.elapsed())}});
+                    stepDone();
+                });
+                reload->start();
             }
-            auto *reload = new Keyblades::CursorReload(this);
-            connect(reload, &Keyblades::CursorReload::finished, reload, &QObject::deleteLater);
-            reload->start();
+            if (stages->size() > 1) {
+                ++m_outstanding;
+                const QStringList rest = stages->at(1);
+                auto outcome = std::make_shared<Keyblades::Outcome>();
+                runOffThread([slug, rest, outcome] {
+                    *outcome = Keyblades::equip(slug, rest);
+                }, [this, slug, outcome] {
+                    if (outcome->rewritten == 0) {
+                        KhLog::error(kContext, QStringLiteral("keyblade not equipped on the other themes"),
+                                     QJsonObject{{QStringLiteral("keyblade"), slug}, {QStringLiteral("error"), outcome->failures.join(QStringLiteral("; "))}});
+                    }
+                    stepDone();
+                });
+            }
+            ++m_outstanding;
+            stepDone();
+        });
+    }
+
+    void runOffThread(std::function<void()> work, std::function<void()> then)
+    {
+        QThread *worker = QThread::create(std::move(work));
+        connect(worker, &QThread::finished, this, [worker, then = std::move(then)] {
+            worker->deleteLater();
+            then();
         });
         worker->start();
     }
 
+    // One part of an equip (the reload, the other themes, the first stage
+    // itself) is over; when none is left the next choice may start.
+    void stepDone()
+    {
+        if (--m_outstanding > 0) {
+            return;
+        }
+        KhLog::info(kContext, QStringLiteral("keyblade equipped everywhere"),
+                    QJsonObject{{QStringLiteral("keyblade"), m_equipping}, {QStringLiteral("duration_ms"), qint64(m_clock.elapsed())}});
+        m_busy = false;
+        const QString next = m_pending;
+        m_pending.clear();
+        if (!next.isEmpty() && next != m_equipping) {
+            equip(next);
+        }
+    }
+
     bool m_busy = false;
+    int m_outstanding = 0;
+    QString m_equipping;
+    QString m_pending;
+    QElapsedTimer m_clock;
 };
 }
 
