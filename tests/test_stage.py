@@ -62,6 +62,13 @@ class StagedPackage(unittest.TestCase):
         missing = [str(p.relative_to(self.dest)) for p in expected if not p.exists()]
         self.assertEqual(missing, [])
 
+    def test_login_screen_helper_and_policy(self) -> None:
+        helper = self.dest / "usr" / "lib" / "kingdom-hearts-plasma" / "login-screen"
+        self.assertTrue(os.access(helper, os.X_OK), helper)
+        policy = (self.share / "polkit-1" / "actions" / "org.kingdomhearts.plasma.login-screen.policy").read_text()
+        self.assertIn('<annotate key="org.freedesktop.policykit.exec.path">/usr/lib/kingdom-hearts-plasma/login-screen'
+                      '</annotate>', policy)
+
     def test_commands_are_executable(self) -> None:
         for name in ("kh-keyblade", "kingdom-hearts-plasma"):
             path = self.usr / "bin" / name

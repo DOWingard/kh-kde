@@ -7,7 +7,9 @@
     ./install.py status             show what is installed and what is active
     ./install.py keyblade [<name>]  list the pointer keyblades, or point with one
     ./install.py uninstall          remove every installed file (revert first)
-    ./install.py sddm [<variant>]   install the login themes and pick one (OrgXIII | Sora | off); asks for sudo
+    ./install.py sddm [<variant>]   install the login themes (sudo); optionally pick one: OrgXIII | Sora | off
+    ./install.py span [<picture>|off]  spread the wallpaper across all screens, or stop
+    ./install.py sync               make the login screen and spanned wallpaper follow the desktop (run by a user unit)
     ./install.py rebind             put Super + right click back if a desktop reset removed it (run at shell start)
     ./install.py stage --destdir D  lay the themes out under D/usr for a distribution package
 
@@ -26,6 +28,8 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import fcntl
+import hashlib
 import json
 import os
 import shlex
@@ -35,7 +39,7 @@ import sys
 import time
 from pathlib import Path
 
-from khtheme import VERSION, kvantum, log, picker, sddm, wallpapers
+from khtheme import VERSION, kvantum, log, picker, sddm, sddmconf, span, wallpapers
 from khtheme.colorscheme import scheme_id
 from khtheme.palette import ORG_XIII, SORA, VARIANTS, Palette
 from khtheme.sounds import THEME_ID as SOUND_THEME
@@ -149,18 +153,31 @@ SETTINGS = {
 CONFIG_FILES = ["kdeglobals", "kwinrc", "plasmarc", "kcminputrc", "ksplashrc", "kscreenlockerrc",
                 "plasma-org.kde.plasma.desktop-appletsrc"]
 
-# SDDM reads these in order, files within a folder sorted by name; a later
-# value overrides an earlier one.
-SDDM_CONF_DIRS = [Path("/usr/lib/sddm/sddm.conf.d"), Path("/etc/sddm.conf.d")]
-SDDM_CONF = Path("/etc/sddm.conf")
-SDDM_THEMES = Path("/usr/share/sddm/themes")
-# The file System Settings' Login Screen page writes; choosing here through it
-# keeps that page in step.
-SDDM_KDE_CONF = Path("/etc/sddm.conf.d/kde_settings.conf")
-# Written by earlier versions; it sorts before kde_settings.conf and so lost to it.
-SDDM_LEGACY_CONF = Path("/etc/sddm.conf.d/10-kingdom-hearts.conf")
 SDDM_STATE = STATE / "sddm.json"
 SDDM_FALLBACK = "breeze"
+# Root helper that switches the login theme (khtheme/sddmconf.py), run through
+# pkexec: where a package installs it, then where `sddm` installs it from source.
+LOGIN_HELPER_PACKAGE = Path("/usr/lib/kingdom-hearts-plasma/login-screen")
+LOGIN_HELPER_LOCAL = Path("/usr/local/lib/kingdom-hearts-plasma/login-screen")
+POLICY_DIR = Path("/usr/share/polkit-1/actions")
+POLICY_ACTION = "org.kingdomhearts.plasma.login-screen"
+# Staging for files a root command copies into place.
+ROOT_STAGING = STATE / "root-staging"
+
+# User units that keep the login screen and the spanned wallpaper in step with
+# the desktop: at login, and whenever the global theme (kdeglobals), the screen
+# layout (kwinoutputconfig.json) or a wallpaper (the shell's own file) changes.
+USER_UNITS = CONFIG / "systemd" / "user"
+SYNC_UNIT = "kingdom-hearts-plasma-sync"
+WATCHED = [CONFIG / "kdeglobals", CONFIG / "kwinoutputconfig.json", CONFIG / "plasma-org.kde.plasma.desktop-appletsrc"]
+SYNC_LOCK = STATE / "sync.lock"
+
+# Spanned wallpaper: one package per screen under a folder named after what
+# it was cut from, so a new cut gets new paths and the shell cannot show a
+# picture it cached under the old ones.
+SPAN_ROOT = OWN_DATA / "span"
+SPAN_STATE = STATE / "span.json"
+SPAN_PACKAGE = f"{PREFIX}-span-screen"
 
 REQUIRED_TOOLS = ["kreadconfig6", "kwriteconfig6", "plasma-apply-lookandfeel", "plasma-apply-wallpaperimage",
                   "plasma-apply-colorscheme", "plasma-apply-desktoptheme", "plasma-apply-cursortheme", "qdbus6"]
@@ -457,6 +474,7 @@ def cmd_uninstall(_args) -> int:
                     return 1
     removed += remove_legacy()
     remove_shell_hook()
+    remove_sync_units()
     for path in (OWN_DATA, ENV_SCRIPT, KEYBLADE_RC):
         if path.exists():
             try:
@@ -743,12 +761,78 @@ def enable_keyblade_browser() -> None:
     log.info("install", "Super + right click on the desktop opens the keyblade browser", plugin=str(plugin))
 
 
-def hook_command() -> str:
-    """The `rebind` command line for the shell hook, quoted for systemd."""
+def tool_command(command: str) -> str:
+    """This tool's command line for a systemd unit, quoted for systemd."""
     launcher = Path("/usr/bin") / SYSTEM_TOOL
     if SYSTEM_INSTALL.is_file() and launcher.is_file():
-        return f'"{launcher}" rebind'
-    return f'"{sys.executable}" "{Path(__file__).resolve()}" rebind'
+        return f'"{launcher}" {command}'
+    return f'"{sys.executable}" "{Path(__file__).resolve()}" {command}'
+
+
+def hook_command() -> str:
+    return tool_command("rebind")
+
+
+def sync_units() -> dict[Path, str]:
+    watched = "".join(f"PathChanged={path}\n" for path in WATCHED)
+    return {
+        USER_UNITS / f"{SYNC_UNIT}.service": (
+            "# Kingdom Hearts theme: the login screen follows the desktop's variant and the\n"
+            "# wallpaper stays spread across the screens. Removed by revert and uninstall.\n"
+            "[Unit]\nDescription=Kingdom Hearts theme: keep the login screen and spanned wallpaper in step\n"
+            "After=plasma-plasmashell.service\n\n"
+            f"[Service]\nType=oneshot\nExecStart={tool_command('sync')}\n\n"
+            "[Install]\nWantedBy=plasma-workspace.target\n"
+        ),
+        USER_UNITS / f"{SYNC_UNIT}.path": (
+            "# Kingdom Hearts theme: runs the sync when the global theme, the screen layout or\n"
+            "# a wallpaper changes. Removed by revert and uninstall.\n"
+            "[Unit]\nDescription=Kingdom Hearts theme: watch the global theme, screens and wallpaper\n\n"
+            f"[Path]\n{watched}Unit={SYNC_UNIT}.service\n\n"
+            "[Install]\nWantedBy=plasma-workspace.target\n"
+        ),
+    }
+
+
+def install_sync_units() -> None:
+    changed = False
+    try:
+        for path, text in sync_units().items():
+            if path.is_file() and path.read_text(encoding="utf-8") == text:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            changed = True
+    except OSError as exc:
+        log.warn("install", "could not install the sync units; the login screen and spanned wallpaper only follow "
+                 "on apply", error=exc, folder=str(USER_UNITS))
+        return
+    if changed:
+        session_tool(["systemctl", "--user", "daemon-reload"], "reload user units")
+    enabled = session_tool(["systemctl", "--user", "enable", f"{SYNC_UNIT}.service", f"{SYNC_UNIT}.path"],
+                           "enable the sync units")
+    started = session_tool(["systemctl", "--user", "start", f"{SYNC_UNIT}.path"], "start watching for changes")
+    if enabled is None or enabled.returncode != 0 or started is None or started.returncode != 0:
+        log.warn("install", "the sync units are installed but not active; they start with the next login",
+                 folder=str(USER_UNITS))
+        return
+    log.info("install", "sync units active: the login screen and spanned wallpaper follow the desktop",
+             units=[str(p) for p in sync_units()], updated=changed)
+
+
+def remove_sync_units() -> None:
+    units = [path for path in sync_units() if path.exists()]
+    if not units:
+        return
+    session_tool(["systemctl", "--user", "disable", "--now", f"{SYNC_UNIT}.path", f"{SYNC_UNIT}.service"],
+                 "disable the sync units")
+    for path in units:
+        try:
+            path.unlink()
+        except OSError as exc:
+            log.warn("install", "could not remove a sync unit", error=exc, path=str(path))
+    session_tool(["systemctl", "--user", "daemon-reload"], "reload user units")
+    log.info("install", "sync units removed")
 
 
 def install_shell_hook() -> None:
@@ -885,10 +969,15 @@ def cmd_apply(args) -> int:
     reload_cursors(pal)
     reload_decoration(pal)
     notify_style_change()
-    login, _ = sddm_current()
-    if not is_ours(login):
-        log.info("install", "the login screen is not themed", current=login or "<default>",
-                 hint=f"./install.py sddm {pal.key}  (or System Settings > Login Screen)")
+    with sync_lock():
+        try:
+            if span_enabled():
+                span_wallpaper(auto=True)
+        except (StepError, OSError, subprocess.SubprocessError) as exc:
+            log.warn("install", "could not spread the wallpaper across the screens; each shows the whole picture",
+                     error=exc)
+        sync_login(pal)
+    install_sync_units()
     log.info("install", "variant applied", variant=pal.key, theme=pal.theme_id)
     return 0
 
@@ -947,6 +1036,7 @@ def cmd_revert(_args) -> int:
 
     step("wallpaper", restore_wallpaper)
     step("keyblade browser", lambda: disable_keyblade_browser(saved))
+    step("sync units", remove_sync_units)
     if "konsole" in data:
         step("konsole", lambda: set_konsole_scheme(None, saved=data["konsole"]))
 
@@ -982,7 +1072,12 @@ def cmd_status(_args) -> int:
         "keyblade_browser_bound": bound,
         "keyblade_browser_missing_libraries": stale,
         "keyblade_browser_shell_hook": SHELL_HOOK.is_file(),
-        "login_screen": sddm_current()[0] or None,
+        "login_screen": sddmconf.current()[0] or None,
+        "login_screen_helper": str(login_helper()) if login_helper() else None,
+        "login_screen_follows_variant": login_helper() is not None and sddmconf.is_ours(sddmconf.current()[0]),
+        "sync_units": all(path.is_file() for path in sync_units()),
+        "wallpaper_span": span_enabled(),
+        "wallpaper_spanned_over": (load_json(SPAN_STATE) or {}).get("screens"),
         "package": system_install().get("version"),
         "backup": str(BACKUP) if BACKUP.exists() else None,
     }
@@ -1003,56 +1098,127 @@ def cmd_keyblade(args) -> int:
     return result.returncode
 
 
-def sddm_files() -> list[Path]:
-    files = [f for d in SDDM_CONF_DIRS if d.is_dir() for f in sorted(d.iterdir()) if f.is_file()]
-    return files + ([SDDM_CONF] if SDDM_CONF.is_file() else [])
+def load_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warn("install", "state file unreadable; ignored", error=exc, path=str(path))
+        return None
 
 
-def ini_value(text: str, group: str, key: str) -> str | None:
-    """Last value of `key` in `[group]`, or None when the text does not set it."""
-    found, section = None, None
-    for line in text.splitlines():
-        line = line.strip()
-        if line.startswith("[") and line.endswith("]"):
-            section = line[1:-1]
-        elif section == group and "=" in line and line.split("=", 1)[0].strip() == key:
-            found = line.split("=", 1)[1].strip()
-    return found
+def save_json(path: Path, data: dict) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except OSError as exc:
+        log.warn("install", "could not save state", error=exc, path=str(path))
 
 
-def sddm_current() -> tuple[str, Path | None]:
-    """The login theme SDDM will show, and the file that sets it (None: SDDM's default)."""
-    current, source = "", None
-    for path in sddm_files():
-        try:
-            value = ini_value(path.read_text(encoding="utf-8", errors="replace"), "Theme", "Current")
-        except OSError as exc:
-            log.warn("sddm", "could not read an SDDM config file", error=exc, path=str(path))
-            continue
-        if value is not None:
-            current, source = value, path
-    return current, source
+class sync_lock:
+    """Serialises `apply`, `span` and the sync unit, which may run together."""
+
+    def __enter__(self):
+        STATE.mkdir(parents=True, exist_ok=True)
+        self.handle = open(SYNC_LOCK, "w")
+        started = time.monotonic()
+        fcntl.flock(self.handle, fcntl.LOCK_EX)
+        waited = round((time.monotonic() - started) * 1000)
+        if waited > 100:
+            log.debug("install", "waited for another sync to finish", waited_ms=waited)
+        return self
+
+    def __exit__(self, *_exc):
+        fcntl.flock(self.handle, fcntl.LOCK_UN)
+        self.handle.close()
 
 
-def with_ini_value(text: str, group: str, key: str, value: str) -> str:
-    """`text` with `key` in `[group]` set to `value`, every other line kept."""
-    lines = text.splitlines()
-    section, group_at, done = None, None, False
-    for n, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
-            section = stripped[1:-1]
-            if section == group:
-                group_at = n
-        elif section == group and "=" in stripped and stripped.split("=", 1)[0].strip() == key:
-            lines[n] = f"{key}={value}"
-            done = True
-    if not done:
-        if group_at is None:
-            lines += ([""] if lines and lines[-1].strip() else []) + [f"[{group}]", f"{key}={value}"]
-        else:
-            lines.insert(group_at + 1, f"{key}={value}")
-    return "\n".join(lines) + "\n"
+# --- login screen --------------------------------------------------------------
+def login_helper() -> Path | None:
+    for helper in (LOGIN_HELPER_PACKAGE, LOGIN_HELPER_LOCAL):
+        if helper.is_file():
+            return helper
+    return None
+
+
+def policy(helper: Path, action: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Kingdom Hearts Plasma theme</vendor>
+  <action id="{action}">
+    <description>Switch the login screen between the Kingdom Hearts themes</description>
+    <message>Matching the login screen to the desktop's Kingdom Hearts variant</message>
+    <!-- No password: the helper, run this way, only switches between the two
+         installed Kingdom Hearts login themes, and only while one of them is
+         already selected. It runs from a background user unit, where no
+         password prompt could be shown. -->
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">{helper}</annotate>
+  </action>
+</policyconfig>
+"""
+
+
+def remember_login(shown: str) -> None:
+    """Keep the last login theme that is not ours, for `sddm off`."""
+    if shown and not sddmconf.is_ours(shown) and (load_json(SDDM_STATE) or {}).get("previous") != shown:
+        save_json(SDDM_STATE, {"previous": shown})
+        log.debug("sddm", "recorded the login theme to return to", previous=shown)
+
+
+def sync_login(pal: Palette | None = None) -> None:
+    """Switch the login screen to the desktop's variant, if a Kingdom Hearts
+    login screen is selected at all."""
+    if pal is None:
+        active = read_setting(*SETTINGS["lookandfeel"])
+        pal = next((p for p in VARIANTS if p.theme_id == active), None)
+        if pal is None:
+            log.debug("sync", "the desktop shows no Kingdom Hearts variant; login screen left as it is", active=active)
+            return
+    shown, _ = sddmconf.current()
+    if not sddmconf.is_ours(shown):
+        remember_login(shown)
+        log.debug("sync", "the login screen is not a Kingdom Hearts one; left as it is", login_screen=shown or "<default>")
+        return
+    target = sddm.theme_id(pal)
+    if shown == target:
+        log.debug("sync", "login screen already matches the desktop", login_screen=shown)
+        return
+    helper = login_helper()
+    if helper is None:
+        log.warn("sync", "the login screen cannot follow the desktop: its helper is not installed",
+                 login_screen=shown, wanted=target, hint="./install.py sddm")
+        return
+    if shutil.which("pkexec") is None:
+        log.warn("sync", "pkexec (polkit) is not installed; the login screen cannot follow the desktop", wanted=target)
+        return
+    result = run(["pkexec", "--disable-internal-agent", str(helper), target], "switch the login screen", check=False)
+    if result.returncode == 0:
+        log.info("sync", "login screen switched to match the desktop", login_screen=target, previous=shown)
+    else:
+        log.warn("sync", "the login screen could not be switched", wanted=target, exit_code=result.returncode,
+                 output=(result.stderr or result.stdout).strip()[-800:])
+
+
+def same_tree(a: Path, b: Path) -> bool:
+    """True when folder `b` holds exactly the files of `a`, byte for byte."""
+    if not b.is_dir():
+        return False
+    files_a = sorted(p.relative_to(a) for p in a.rglob("*") if p.is_file())
+    files_b = sorted(p.relative_to(b) for p in b.rglob("*") if p.is_file())
+    return files_a == files_b and all((a / f).read_bytes() == (b / f).read_bytes() for f in files_a)
+
+
+def same_file(path: Path, data: bytes) -> bool:
+    try:
+        return path.is_file() and path.read_bytes() == data
+    except OSError:
+        return False
 
 
 def sddm_source(pal: Palette) -> tuple[Path | None, bool]:
@@ -1060,95 +1226,75 @@ def sddm_source(pal: Palette) -> tuple[Path | None, bool]:
     built = DIST / "sddm" / sddm.theme_id(pal)
     if built.is_dir():
         return built, False
-    installed = SDDM_THEMES / sddm.theme_id(pal)
+    installed = sddmconf.THEMES / sddm.theme_id(pal)
     return (installed, True) if installed.is_dir() else (None, False)
 
 
-def choose_login(arg: str | None) -> str:
-    """'off' or a variant key: the argument, else asked, else the active variant."""
-    keys = [pal.key for pal in VARIANTS] + ["off"]
-    if arg:
-        match = next((k for k in keys if k.lower() == arg.lower()), None)
-        if match is None:
-            raise StepError(f"unknown login screen {arg!r}; choose from {keys}")
-        return match
-    active = read_setting(*SETTINGS["lookandfeel"]) if shutil.which("kreadconfig6") else ""
-    default = next((pal.key for pal in VARIANTS if pal.theme_id == active), VARIANTS[0].key)
-    if not sys.stdin.isatty():
-        log.info("sddm", "no login screen named and no terminal to ask; using the active variant", choice=default)
-        return default
-    options = [f"Kingdom Hearts – {pal.title} ({'dark' if pal.dark else 'light'})" for pal in VARIANTS]
-    options.append("Off: go back to the login screen used before")
-    print("Login screen:")
-    for n, text in enumerate(options, 1):
-        print(f"  {n}. {text}{'  [default]' if keys[n - 1] == default else ''}")
-    answer = input(f"Choose 1-{len(options)}: ").strip()
-    if not answer:
-        return default
-    if answer.isdigit() and 1 <= int(answer) <= len(options):
-        return keys[int(answer) - 1]
-    raise StepError(f"not a choice: {answer!r}")
-
-
 def cmd_sddm(args) -> int:
-    choice = choose_login(args.variant)
-    current, source = sddm_current()
-    script = ["set -e"]
-    if choice == "off":
-        try:
-            target = json.loads(SDDM_STATE.read_text(encoding="utf-8")).get("previous") or SDDM_FALLBACK
-        except (OSError, json.JSONDecodeError) as exc:
-            log.warn("sddm", "no record of the earlier login screen; using Plasma's", error=exc, fallback=SDDM_FALLBACK)
-            target = SDDM_FALLBACK
-    else:
-        pal = variant(choice)
-        target = sddm.theme_id(pal)
-        missing = []
-        for each in VARIANTS:
-            folder, installed = sddm_source(each)
-            if folder is None:
-                missing.append(sddm.theme_id(each))
-            elif not installed:
-                dest = SDDM_THEMES / folder.name
-                script.append(f"rm -rf {shlex.quote(str(dest))}")
-                script.append(f"cp -r {shlex.quote(str(folder))} {shlex.quote(str(SDDM_THEMES))}/")
-                script.append(f"chmod -R u=rwX,go=rX {shlex.quote(str(dest))}")
-        if target in missing:
-            log.error("sddm", "login theme not built; run './build.py --only sddm'", missing=missing)
+    choice = None
+    if args.variant:
+        keys = [pal.key for pal in VARIANTS] + ["off"]
+        choice = next((k for k in keys if k.lower() == args.variant.lower()), None)
+        if choice is None:
+            log.error("sddm", "unknown login screen", choice=args.variant, choose_from=keys)
             return 2
-        if missing:
-            log.warn("sddm", "a login theme is not built and is left out", missing=missing)
-        legacy = SDDM_THEMES / sddm.LEGACY_ID
-        if legacy.is_dir():
-            script.append(f"rm -rf {shlex.quote(str(legacy))}")
-    # Write where the value SDDM uses now comes from, so nothing later overrides
-    # it; a value from SDDM's own defaults goes into System Settings' file.
-    conf = source if source is not None and source != SDDM_LEGACY_CONF and str(source).startswith("/etc/") \
-        else SDDM_KDE_CONF
-    try:
-        text = conf.read_text(encoding="utf-8") if conf.is_file() else ""
-    except OSError as exc:
-        log.error("sddm", "could not read the SDDM config file", error=exc, path=str(conf))
-        return 1
-    staged = STATE / "sddm-config.new"
-    try:
-        STATE.mkdir(parents=True, exist_ok=True)
-        staged.write_text(with_ini_value(text, "Theme", "Current", target), encoding="utf-8")
-    except OSError as exc:
-        log.error("sddm", "could not prepare the SDDM config", error=exc, path=str(staged))
-        return 1
-    script.append(f"mkdir -p {shlex.quote(str(conf.parent))}")
-    script.append(f"install -m 644 {shlex.quote(str(staged))} {shlex.quote(str(conf))}")
-    if SDDM_LEGACY_CONF.exists():
-        script.append(f"rm -f {shlex.quote(str(SDDM_LEGACY_CONF))}")
+    shown, _ = sddmconf.current()
+    remember_login(shown)
+    q = shlex.quote
+    script = ["set -e"]
+    missing = []
+    for pal in VARIANTS:
+        folder, installed = sddm_source(pal)
+        if folder is None:
+            missing.append(sddm.theme_id(pal))
+        elif not installed and not same_tree(folder, sddmconf.THEMES / folder.name):
+            dest = sddmconf.THEMES / folder.name
+            script += [f"rm -rf {q(str(dest))}", f"cp -r {q(str(folder))} {q(str(sddmconf.THEMES))}/",
+                       f"chmod -R u=rwX,go=rX {q(str(dest))}"]
+    if missing:
+        log.warn("sddm", "login theme not built or installed; run './build.py --only sddm'", missing=missing)
+    legacy = sddmconf.THEMES / sddm.LEGACY_ID
+    if legacy.is_dir():
+        script.append(f"rm -rf {q(str(legacy))}")
+    helper = LOGIN_HELPER_PACKAGE if LOGIN_HELPER_PACKAGE.is_file() else LOGIN_HELPER_LOCAL
+    action = f"{POLICY_ACTION}.local"
+    helper_text = Path(sddmconf.__file__).read_bytes()
+    policy_file = POLICY_DIR / f"{action}.policy"
+    if helper == LOGIN_HELPER_LOCAL and not (same_file(helper, helper_text)
+                                             and same_file(policy_file, policy(helper, action).encode())):
+        # Root runs the helper, so it is copied to a root-owned place rather
+        # than run from this (user-writable) checkout.
+        try:
+            ROOT_STAGING.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(Path(sddmconf.__file__), ROOT_STAGING / "login-screen")
+            (ROOT_STAGING / f"{action}.policy").write_text(policy(helper, action), encoding="utf-8")
+        except OSError as exc:
+            log.error("sddm", "could not prepare the login screen helper", error=exc, folder=str(ROOT_STAGING))
+            return 1
+        script += [f"install -D -m 755 -o root -g root {q(str(ROOT_STAGING / 'login-screen'))} {q(str(helper))}",
+                   f"install -D -m 644 -o root -g root {q(str(ROOT_STAGING / f'{action}.policy'))} "
+                   f"{q(str(policy_file))}"]
+    target = None
+    if choice == "off":
+        target = (load_json(SDDM_STATE) or {}).get("previous") or SDDM_FALLBACK
+    elif choice:
+        target = sddm.theme_id(variant(choice))
+        if target in missing:
+            log.error("sddm", "that login theme is not built; run './build.py --only sddm'", theme=target)
+            return 2
+    if target:
+        script.append(f"{q(str(helper))} {q(target)}")
+    if len(script) == 1:
+        log.info("sddm", "the login themes and their helper are installed already; nothing to do",
+                 login_screen=shown or "<default>")
+        return 0
     shell = "\n".join(script) + "\n"
     if args.print:
-        print(f"# Selects login screen {target} (needs root):")
-        print(f"sudo sh -c {shlex.quote(shell)}")
+        print("# Installs the Kingdom Hearts login themes (needs root):")
+        print(f"sudo sh -c {q(shell)}")
         return 0
 
-    log.info("sddm", "setting the login screen; sudo asks for your password", choice=target, previous=current or "<default>",
-             config=str(conf))
+    log.info("sddm", "installing the login themes; sudo asks for your password", select=target, helper=str(helper))
     started = time.monotonic()
     try:
         # Not captured: sudo needs the terminal to ask for the password.
@@ -1157,23 +1303,196 @@ def cmd_sddm(args) -> int:
         log.error("sddm", "could not run sudo", error=exc, hint="./install.py sddm --print shows the commands")
         return 1
     finally:
-        staged.unlink(missing_ok=True)
+        shutil.rmtree(ROOT_STAGING, ignore_errors=True)
     if result.returncode != 0:
-        log.error("sddm", "installing the login screen failed", exit_code=result.returncode,
+        log.error("sddm", "installing the login themes failed", exit_code=result.returncode,
                   hint="./install.py sddm --print shows the commands")
         return 1
-    if choice != "off" and not is_ours(current):
+    now, _ = sddmconf.current()
+    log.info("sddm", "login themes installed", login_screen=now or "<default>",
+             duration_ms=round((time.monotonic() - started) * 1000))
+    if sddmconf.is_ours(now):
+        log.info("sddm", "the login screen now follows the desktop's variant; it shows from the next time SDDM starts")
+    else:
+        log.info("sddm", "pick 'Kingdom Hearts – Organization XIII' or '– Sora' under System Settings > Colors & "
+                 "Themes > Login Screen (SDDM); from then on it follows the desktop's variant")
+    return 0
+
+
+# --- spanned wallpaper ---------------------------------------------------------
+def span_enabled() -> bool:
+    return read_setting(KEYBLADE_RC.name, ["Wallpaper"], "Span") != "false"
+
+
+def desktop_screens() -> list[dict]:
+    """Every desktop with its screen's logical rectangle and its picture."""
+    out = plasma_script(
+        "var out=[]; var ds=desktops(); for (var i=0;i<ds.length;i++){ var d=ds[i];"
+        "if (d.screen<0) continue; d.currentConfigGroup=['Wallpaper', d.wallpaperPlugin, 'General'];"
+        "var g=screenGeometry(d.screen);"
+        "out.push({id:d.id,screen:d.screen,plugin:d.wallpaperPlugin,image:String(d.readConfig('Image','')),"
+        "rect:[g.x,g.y,g.width,g.height]});} print(JSON.stringify(out));",
+        "read the screens and their pictures",
+    )
+    try:
+        desks = json.loads(out)
+    except json.JSONDecodeError as exc:
+        log.error("span", "could not parse the screen layout", error=exc, raw=out[:300])
+        raise StepError("screen layout unreadable") from exc
+    log.debug("span", "screens read", desktops=desks)
+    return desks
+
+
+def largest_image(folder: Path) -> Path | None:
+    best, area = None, -1
+    for image in folder.glob("*.*") if folder.is_dir() else []:
         try:
-            SDDM_STATE.write_text(json.dumps({"previous": current}) + "\n", encoding="utf-8")
-        except OSError as exc:
-            log.warn("sddm", "could not record the earlier login screen; 'sddm off' will use Plasma's", error=exc)
-    shown, by = sddm_current()
-    if shown != target:
-        log.error("sddm", "another SDDM config file still overrides the login screen", wanted=target, shown=shown,
-                  file=str(by))
-        return 1
-    log.info("sddm", "login screen set; it shows from the next time SDDM starts (log out or reboot)", theme=target,
-             config=str(conf), duration_ms=round((time.monotonic() - started) * 1000))
+            w, h = (int(v) for v in image.stem.split("x"))
+        except ValueError:
+            continue
+        if w * h > area:
+            best, area = image, w * h
+    return best
+
+
+def pictures_of(image: str) -> dict | None:
+    """What a wallpaper setting shows: its light and (optional) dark picture."""
+    path = Path(image.removeprefix("file://"))
+    if path.is_dir():
+        light = largest_image(path / "contents" / "images")
+        if light is None:
+            return None
+        dark = largest_image(path / "contents" / "images_dark")
+        return {"origin": str(path), "light": str(light), "dark": str(dark) if dark else None}
+    if path.is_file():
+        return {"origin": str(path), "light": str(path), "dark": None}
+    return None
+
+
+def is_span(image: str) -> bool:
+    return str(SPAN_ROOT) in image
+
+
+def set_desktop_pictures(by_screen: dict[int, str]) -> None:
+    script = (
+        "var m=" + json.dumps({str(k): v for k, v in by_screen.items()}) + "; var ds=desktops();"
+        "for (var i=0;i<ds.length;i++){ var d=ds[i]; var url=m[String(d.screen)]; if (url===undefined) continue;"
+        "d.wallpaperPlugin='org.kde.image'; d.currentConfigGroup=['Wallpaper','org.kde.image','General'];"
+        "d.writeConfig('Image', url); }"
+    )
+    plasma_script(script, "set the screens' pictures")
+
+
+def span_wallpaper(auto: bool, picture: str | None = None) -> None:
+    """Spread one picture over all screens; with one screen, show it whole.
+
+    `auto` (apply and the sync unit) only touches desktops showing one of
+    these themes' pictures or an earlier span; an explicit picture is spanned
+    whatever it is.
+    """
+    started = time.monotonic()
+    desks = desktop_screens()
+    if not desks:
+        log.warn("span", "no desktops found; wallpaper left as it is")
+        return
+    state = load_json(SPAN_STATE) or {}
+    pictures = None
+    if picture:
+        pictures = pictures_of(str(Path(picture).expanduser().resolve()))
+        if pictures is None:
+            raise StepError(f"not a picture or wallpaper package: {picture}")
+    else:
+        # A desktop not showing the span is one the user just changed, or the
+        # desktop of a newly attached screen.
+        known = {n for n, _ in state.get("screens", [])}
+        fresh = [d for d in sorted(desks, key=lambda d: d["screen"]) if not is_span(d["image"])]
+        own = [d for d in fresh if not points_at_ours(d["image"]) and d["screen"] in known]
+        if auto and own:
+            log.debug("span", "a screen shows a picture of the user's own; wallpaper left as it is",
+                      screen=own[0]["screen"], image=own[0]["image"])
+            return
+        candidates = [d for d in fresh if points_at_ours(d["image"])] if auto else fresh
+        pictures = pictures_of(candidates[0]["image"]) if candidates else state.get("pictures")
+        if pictures is None:
+            log.debug("span", "nothing to span", images=[d["image"] for d in desks])
+            return
+    screens = sorted({d["screen"]: d["rect"] for d in desks}.items())
+    if len(screens) < 2:
+        if any(is_span(d["image"]) for d in desks) or picture:
+            set_desktop_pictures({n: "file://" + pictures["origin"] for n, _ in screens})
+            log.info("span", "one screen: the whole picture is shown", picture=pictures["origin"])
+        shutil.rmtree(SPAN_ROOT, ignore_errors=True)
+        # Kept, so a screen attached later is told apart from one the user changed.
+        save_json(SPAN_STATE, {"tag": None, "pictures": pictures, "screens": screens})
+        return
+    sources = [p for p in (pictures["light"], pictures["dark"]) if p]
+    missing = [p for p in sources if not Path(p).is_file()]
+    if missing:
+        log.warn("span", "the spanned picture is gone; wallpaper left as it is", missing=missing)
+        return
+    signature = {"pictures": pictures, "screens": screens,
+                 "mtimes": [Path(p).stat().st_mtime for p in sources]}
+    tag = hashlib.sha1(json.dumps(signature, sort_keys=True).encode()).hexdigest()[:12]
+    folder = SPAN_ROOT / tag
+    targets = {n: f"file://{folder / f'{SPAN_PACKAGE}-{n}'}" for n, _ in screens}
+    if state.get("tag") == tag and all(d["image"] == targets[d["screen"]] for d in desks):
+        log.debug("span", "wallpaper already spanned over these screens", tag=tag)
+        return
+    rects = [span.Rect(*rect) for _, rect in screens]
+    if not folder.is_dir():
+        if shutil.which("magick") is None:
+            log.warn("span", "ImageMagick (magick) is not installed; the wallpaper cannot be spanned")
+            return
+        staging = SPAN_ROOT / f".{tag}.new"
+        shutil.rmtree(staging, ignore_errors=True)
+        for kind, source in (("images", pictures["light"]), ("images_dark", pictures["dark"])):
+            if not source:
+                continue
+            cuts = span.crops(span.size(Path(source)), rects)
+            for (n, _), (x, y, w, h) in zip(screens, cuts):
+                span.cut(Path(source), (x, y, w, h), staging / f"{SPAN_PACKAGE}-{n}" / "contents" / kind / f"{w}x{h}.jpg")
+        for n, _ in screens:
+            package = staging / f"{SPAN_PACKAGE}-{n}"
+            package.mkdir(parents=True, exist_ok=True)
+            meta = {"KPlugin": {"Id": f"{SPAN_PACKAGE}-{n}", "Name": f"Kingdom Hearts (screen {n + 1} of a span)"}}
+            (package / "metadata.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        staging.rename(folder)
+    set_desktop_pictures(targets)
+    for old in SPAN_ROOT.iterdir():
+        if old != folder:
+            shutil.rmtree(old, ignore_errors=True)
+    save_json(SPAN_STATE, {"tag": tag, "pictures": pictures, "screens": screens})
+    log.info("span", "wallpaper spread across the screens", picture=pictures["origin"], screens=screens,
+             dark_picture=bool(pictures["dark"]), duration_ms=round((time.monotonic() - started) * 1000))
+
+
+def cmd_span(args) -> int:
+    with sync_lock():
+        if args.picture == "off":
+            write_setting(KEYBLADE_RC.name, ["Wallpaper"], "Span", "false")
+            state = load_json(SPAN_STATE) or {}
+            origin = (state.get("pictures") or {}).get("origin")
+            if origin:
+                desks = desktop_screens()
+                set_desktop_pictures({d["screen"]: "file://" + origin for d in desks if is_span(d["image"])})
+            shutil.rmtree(SPAN_ROOT, ignore_errors=True)
+            SPAN_STATE.unlink(missing_ok=True)
+            log.info("span", "wallpaper no longer spanned; each screen shows the whole picture", picture=origin)
+            return 0
+        write_setting(KEYBLADE_RC.name, ["Wallpaper"], "Span", None)
+        span_wallpaper(auto=False, picture=args.picture)
+    return 0
+
+
+def cmd_sync(_args) -> int:
+    """Run by the sync units. Never fails: each part logs its own problems."""
+    with sync_lock():
+        for what, step in (("login screen", sync_login), ("spanned wallpaper",
+                                                           lambda: span_wallpaper(auto=True) if span_enabled() else None)):
+            try:
+                step()
+            except Exception as exc:
+                log.error("sync", f"{what}: sync failed", error=exc)
     return 0
 
 
@@ -1223,6 +1542,11 @@ def cmd_stage(args) -> int:
         plugin_target = destdir / qt_plugins.relative_to("/") / picker.NAMESPACE / plugin.name
         stage_copy(plugin, plugin_target, 0o755)
         stage_copy(tool, usr / "bin" / tool.name, 0o755)
+        helper = destdir / LOGIN_HELPER_PACKAGE.relative_to("/")
+        stage_copy(Path(sddmconf.__file__), helper, 0o755)
+        policy_file = destdir / POLICY_DIR.relative_to("/") / f"{POLICY_ACTION}.policy"
+        policy_file.parent.mkdir(parents=True, exist_ok=True)
+        policy_file.write_text(policy(LOGIN_HELPER_PACKAGE, POLICY_ACTION), encoding="utf-8")
 
         share = usr / "share" / SYSTEM_TOOL
         stage_copy(Path(__file__).resolve(), share / "install.py", 0o755)
@@ -1264,11 +1588,16 @@ def main() -> int:
     keyblade_parser.set_defaults(fn=cmd_keyblade)
     sub.add_parser("uninstall").set_defaults(fn=cmd_uninstall)
     sddm_parser = sub.add_parser("sddm")
-    sddm_parser.add_argument("variant", nargs="?", help="OrgXIII, Sora, or off (the login screen used before); "
-                             "omit to choose from a list")
+    sddm_parser.add_argument("variant", nargs="?", help="also select OrgXIII, Sora, or off (the login screen used "
+                             "before); omit to only install, then pick one in System Settings")
     sddm_parser.add_argument("--print", action="store_true", help="print the root commands instead of running them")
     sddm_parser.set_defaults(fn=cmd_sddm)
     sub.add_parser("rebind").set_defaults(fn=cmd_rebind)
+    span_parser = sub.add_parser("span")
+    span_parser.add_argument("picture", nargs="?", help="picture or wallpaper package to spread across the screens, or "
+                             "'off'; omit to span what the desktop shows")
+    span_parser.set_defaults(fn=cmd_span)
+    sub.add_parser("sync").set_defaults(fn=cmd_sync)
     stage_parser = sub.add_parser("stage")
     stage_parser.add_argument("--destdir", required=True, help="root to lay /usr out under (a package's staging folder)")
     stage_parser.set_defaults(fn=cmd_stage)

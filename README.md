@@ -86,7 +86,7 @@ kingdom-hearts-plasma apply Sora      # or OrgXIII; each user runs this
 ```
 
 `kingdom-hearts-plasma` takes the same commands as `./install.py` below
-(`apply`, `revert`, `status`, `keyblade`, `sddm`, `uninstall`); there is
+(`apply`, `revert`, `status`, `keyblade`, `sddm`, `span`, `uninstall`); there is
 nothing to `install`. The system copies of the cursor themes are read-only, so
 the first time you choose a keyblade they are copied to `~/.icons` and the copy
 is changed; after a package upgrade the next `apply` or keyblade choice makes
@@ -165,6 +165,32 @@ package named plain "Kingdom Hearts" is the one `apply` sets: it shows Sora,
 Donald and Goofy in light mode and the Dive to the Heart picture in dark mode.
 The picture each variant starts with is the entry marked `default=True` in
 `khtheme/wallpapers.py`.
+
+#### Across several screens
+
+With two or more screens, `apply` spreads one picture over all of them, as if
+it were a single wallpaper behind the whole arrangement. The screens' places
+come from the desktop's own layout (Display Configuration), so rotation,
+offsets and scale are taken into account: a portrait screen beside a landscape
+one shows the part of the picture that lies behind it, and the area no screen
+covers is left out. Each screen's part keeps a light and a dark picture, so the
+day/night switch still works. The parts are written to
+`~/.local/share/kingdom-hearts-plasma/span/` and the screens show them as
+ordinary wallpaper packages.
+
+The span follows the desktop. When a screen is attached, removed or moved, or
+when you choose another "Kingdom Hearts — …" picture for any screen, the sync
+unit (below) cuts the picture again. If you choose a picture of your own for a
+screen, the span stops and your choice is left alone. By hand:
+
+```sh
+./install.py span                 # spread what the desktop shows
+./install.py span ~/Pictures/x.jpg  # spread any picture or wallpaper package
+./install.py span off             # stop; every screen shows the whole picture
+```
+
+With one screen the picture is shown whole. Spanning needs ImageMagick
+(`magick`).
 
 ### Sounds
 
@@ -248,27 +274,52 @@ fonts. To use KHMenu elsewhere, pick it in System Settings → Fonts.
 
 ### Login screen
 
-Each variant is its own SDDM theme, `KingdomHearts-OrgXIII` and
-`KingdomHearts-Sora`. SDDM themes live in system directories, so installing
-them needs root:
+Each variant is its own SDDM theme, listed in System Settings → Colors &
+Themes → Login Screen (SDDM) as "Kingdom Hearts – Organization XIII" and
+"Kingdom Hearts – Sora". Pick either there. From then on the login screen
+follows the desktop: whenever the Global Theme changes, by `apply` or by
+Plasma's day/night switch, the login screen switches to the matching variant.
+Pick any other login theme and it is left alone.
+
+SDDM themes live in system directories, so a source install puts them there
+once, with root:
 
 ```sh
-./install.py sddm          # asks which login screen to use, then sudo
-./install.py sddm Sora     # or name it: OrgXIII | Sora | off
+./install.py sddm          # install both themes and the switching helper (sudo)
+./install.py sddm Sora     # the same, and select one: OrgXIII | Sora | off
 ./install.py sddm --print  # show the root commands instead of running them
 ```
 
-It copies both themes into `/usr/share/sddm/themes` and sets `[Theme] Current`
-in the SDDM config file that currently decides it, usually
-`/etc/sddm.conf.d/kde_settings.conf`, which System Settings' Login Screen page
-writes. SDDM reads its config files in name order and the last value wins, so a
-separate drop-in would lose to that file. Once installed, both themes are also
-listed in System Settings → Colors & Themes → Login Screen (SDDM). `off` goes
-back to the login screen used before. The change shows the next time SDDM
-starts. `apply` and `status` say when the login screen is not one of these.
+`off` goes back to the login theme used before a Kingdom Hearts one. The AUR
+package installs the themes and the helper itself.
 
-The AUR package installs both themes already, and `kingdom-hearts-plasma sddm`
-only selects one.
+The switch is made by a small root helper, `login-screen`
+(`/usr/lib/kingdom-hearts-plasma/` from the package,
+`/usr/local/lib/kingdom-hearts-plasma/` from source), which the user's sync unit
+runs through `pkexec`. Its polkit policy lets any local user run it without a
+password because, run that way, it can only switch between the two installed
+Kingdom Hearts themes, and only while one of them is already selected. It
+writes `[Theme] Current` into the SDDM config file that decides it, usually
+`/etc/sddm.conf.d/kde_settings.conf`, the file System Settings writes, so that
+page always shows the current choice. The change shows the next time SDDM
+starts (log out or reboot).
+
+The sync unit is two user units that `apply` installs and enables,
+`~/.config/systemd/user/kingdom-hearts-plasma-sync.{service,path}`. They run
+`install.py sync` at login and whenever `kdeglobals` (the Global Theme),
+`kwinoutputconfig.json` (the screen layout) or the shell's own file (the
+wallpapers) changes. `revert` and `uninstall` remove them. `status` reports
+`login_screen`, `login_screen_follows_variant`, `sync_units` and the span.
+
+To remove the login themes and helper of a source install:
+
+```sh
+sudo rm -r /usr/share/sddm/themes/KingdomHearts-* /usr/local/lib/kingdom-hearts-plasma \
+  /usr/share/polkit-1/actions/org.kingdomhearts.plasma.login-screen.local.policy
+```
+
+Select another login theme first; SDDM falls back to its built-in one if the
+selected theme is missing.
 
 The login screen is fitted to each variant's default picture at build time: the
 clock and login card stand over the calmest of the left, middle and right
@@ -440,7 +491,7 @@ AUR files from the release, raise `pkgrel`, regenerate `.SRCINFO` with
 
 ```
 build.py              build entry point
-install.py            install / apply / revert / uninstall / status / sddm / stage
+install.py            install / apply / revert / uninstall / status / sddm / span / sync / rebind / stage
 ASSETS.md             where every piece of third-party art comes from
 assets/               reference art, sprites, fonts, logo, sounds, wallpapers
 khtheme/
@@ -459,7 +510,9 @@ khtheme/
   fonts.py            font staging
   konsole.py          terminal colours
   lookandfeel.py      Global Theme packages and splash
-  sddm.py             login theme
+  sddm.py             login themes
+  sddmconf.py         SDDM config cascade; also installed as the root login-screen helper
+  span.py             cutting one picture into per-screen parts
   log.py              structured logging
 picker/               keyblade menu: Plasma mouse-action plugin, kh-keyblade, preview host
 packaging/aur/        PKGBUILD template and install messages for the AUR package
