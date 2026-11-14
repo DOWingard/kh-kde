@@ -138,6 +138,7 @@ Rectangle {
 
     readonly property var rows: [nameRow, passRow, startRow, sessionRow, powerRow]
     property int current: 0
+    property int userIndex: 0
     property int sessionIndex: sessionModel.lastIndex >= 0 ? sessionModel.lastIndex : 0
     property int powerIndex: 0
     property bool failed: false
@@ -157,7 +158,7 @@ Rectangle {
         root.failed = false;
         root.notice = "";
         root.busy = true;
-        sddm.login(nameInput.text, passInput.text, root.sessionIndex);
+        sddm.login(root.userName(), passInput.text, root.sessionIndex);
     }
     function power() {
         if (root.powers.length === 0) return;
@@ -165,6 +166,19 @@ Rectangle {
         if (key === "off") sddm.powerOff();
         else if (key === "reboot") sddm.reboot();
         else sddm.suspend();
+    }
+    // The account to sign in: the one picked from SDDM's list, or the one typed
+    // when SDDM lists none (every user hidden by its configuration).
+    function userName() {
+        var item = users.count > 0 ? users.itemAt(root.userIndex % users.count) : null;
+        return item ? item.userName : nameInput.text;
+    }
+    // The account that last signed in, so the usual one is already chosen.
+    function lastUserIndex() {
+        if (userModel.lastIndex >= 0 && userModel.lastIndex < users.count) return userModel.lastIndex;
+        for (var i = 0; i < users.count; i++)
+            if (users.itemAt(i).userName === userModel.lastUser) return i;
+        return 0;
     }
     function select(n) {
         root.current = Math.max(0, Math.min(root.rows.length - 1, n));
@@ -195,6 +209,11 @@ Rectangle {
     Item {
         visible: false
         Repeater { id: sessions; model: sessionModel; delegate: Item { property string sessionName: model.name } }
+        Repeater {
+            id: users
+            model: userModel
+            delegate: Item { property string userName: model.name; property string realName: model.realName || "" }
+        }
     }
 
     // ---- one menu bar ----
@@ -202,6 +221,8 @@ Rectangle {
         id: row
         property int index: 0
         property Item input: null
+        // A click on the chosen row steps through its choices instead of using it.
+        property bool clickCycles: false
         readonly property bool selected: root.current === index
         default property alias content: slot.data
         signal activated()
@@ -274,7 +295,9 @@ Rectangle {
             anchors.fill: parent
             z: 10
             onClicked: {
-                if (row.selected) row.activated(); else root.select(row.index);
+                if (!row.selected) root.select(row.index);
+                else if (row.clickCycles) row.cycled(1);
+                else row.activated();
                 row.takeFocus();
             }
         }
@@ -336,6 +359,7 @@ Rectangle {
         property bool selected: false
         property string label: ""
         property alias input: editor
+        property alias echoMode: editor.echoMode
         anchors.fill: parent
         RowText { selected: field.selected; visible: editor.text.length === 0; text: field.label }
         Text {
@@ -360,6 +384,8 @@ Rectangle {
             font.family: menuFont.name
             font.pixelSize: root.textSize
             font.letterSpacing: root.textSize * root.c.letterSpacing
+            passwordCharacter: "\u2022"
+            passwordMaskDelay: 0
         }
     }
 
@@ -422,16 +448,27 @@ Rectangle {
             MenuRow {
                 id: nameRow
                 index: 0
-                input: nameField.input
+                readonly property bool picking: users.count > 0
+                readonly property var item: picking ? users.itemAt(root.userIndex % users.count) : null
+                readonly property string name: item ? (item.realName.length > 0 ? item.realName : item.userName).toUpperCase() : ""
+                input: picking ? null : nameField.input
+                clickCycles: picking && users.count > 1
                 onActivated: root.select(1)
-                RowInput { id: nameField; selected: nameRow.selected; label: "LOGIN" }
+                onCycled: (step) => { if (picking) root.userIndex = (root.userIndex + step + users.count) % users.count; }
+                RowInput { id: nameField; visible: !nameRow.picking; selected: nameRow.selected; label: "LOGIN" }
+                RowText {
+                    visible: nameRow.picking
+                    selected: nameRow.selected
+                    text: (nameRow.selected && users.count > 1 ? "‹ " : "") + nameRow.name
+                          + (nameRow.selected && users.count > 1 ? " ›" : "")
+                }
             }
             MenuRow {
                 id: passRow
                 index: 1
                 input: passField.input
                 onActivated: root.login()
-                RowInput { id: passField; selected: passRow.selected; label: "PASSWORD" }
+                RowInput { id: passField; selected: passRow.selected; label: "PASSWORD"; echoMode: TextInput.Password }
             }
             MenuRow {
                 id: startRow
@@ -471,7 +508,14 @@ Rectangle {
     readonly property alias nameInput: nameField.input
     readonly property alias passInput: passField.input
 
-    Component.onCompleted: rows[current].takeFocus()
+    // With an account already chosen, typing goes straight to the password.
+    Component.onCompleted: {
+        if (users.count > 0) {
+            root.userIndex = root.lastUserIndex();
+            root.current = 1;
+        }
+        rows[current].takeFocus();
+    }
 }
 """
 

@@ -5,7 +5,8 @@ Item { id: w; width: 1280; height: 720
         signal loginFailed(); signal loginSucceeded(); signal informationMessage(string message)
         function login(u, p, i) { console.log("LOGIN", u, p.length, i); loginFailed() }
         function powerOff() {} function reboot() {} function suspend() {} }
-    QtObject { id: userModel; property string lastUser: "roxas"; property int lastIndex: 0 }
+    ListModel { id: userModel; property string lastUser: "roxas"; property int lastIndex: -1
+        ListElement { name: "axel"; realName: "" } ListElement { name: "roxas"; realName: "" } }
     ListModel { id: sessionModel; property int lastIndex: 1
         ListElement { name: "Plasma (X11)"; file: "plasmax11" } ListElement { name: "Plasma (Wayland)"; file: "plasma" } }
     QtObject { id: keyboard; property bool capsLock: w.fail; property bool numLock: false }
